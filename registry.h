@@ -1,0 +1,45 @@
+#ifndef REGISTRY_H
+#define REGISTRY_H
+
+#include "pin.H"
+#include <string>
+#include <types.h>
+
+using std::string;
+
+typedef struct Node {
+    // Objects with starting addresses less than the key.
+    struct Node *left;
+
+    // Objects with starting addresses greater than the key.
+    struct Node *right;
+
+    // The object this node represents.
+    string object;
+
+    // The address of this object.
+    ADDRINT start;
+
+    // The size of the allocated object.
+    USIZE size;
+} Node;
+
+class Registry {
+private:
+    Node *root;
+
+public:
+    // Construct a new registry.
+    Registry();
+
+    // Map starting address `key` to the object `value`.
+    void insert(ADDRINT key, USIZE size, string object);
+
+    // Find the object that contains `addr`.
+    Node *find(ADDRINT addr);
+
+    // Remove the mapping that uses `key` as its key. 
+    Node *remove(ADDRINT key);
+};
+
+#endif // REGISTRY_H
