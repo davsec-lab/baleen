@@ -32,8 +32,8 @@ public:
     // Construct a new registry.
     Registry();
 
-    // Map starting address `key` to the object `value`.
-    void insert(ADDRINT key, USIZE size, string object);
+    // Map address to object.
+    void insert(ADDRINT start, USIZE size, string object);
 
     // Find the object that contains `addr`.
     Node *find(ADDRINT addr);

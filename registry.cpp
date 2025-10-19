@@ -1,16 +1,14 @@
 #include "registry.h"
 
-// Construct a new registry.
 Registry::Registry() : root(nullptr) {}
 
-// Map starting address `key` to the object `value`.
-void Registry::insert(ADDRINT key, USIZE size, string object) {
+void Registry::insert(ADDRINT start, USIZE size, string object) {
     // Create the new node
     Node *newNode = new Node;
     newNode->left = nullptr;
     newNode->right = nullptr;
     newNode->object = object;
-    newNode->start = key;
+    newNode->start = start;
     newNode->size = size;
     
     // If tree is empty, set as root
@@ -26,9 +24,9 @@ void Registry::insert(ADDRINT key, USIZE size, string object) {
     while (current != nullptr) {
         parent = current;
         
-        if (key < current->start) {
+        if (start < current->start) {
             current = current->left;
-        } else if (key > current->start) {
+        } else if (start > current->start) {
             current = current->right;
         } else {
             // Key already exists - could handle this differently
@@ -41,7 +39,7 @@ void Registry::insert(ADDRINT key, USIZE size, string object) {
     }
     
     // Insert the new node
-    if (key < parent->start) {
+    if (start < parent->start) {
         parent->left = newNode;
     } else {
         parent->right = newNode;
@@ -57,13 +55,13 @@ Node *Registry::find(ADDRINT addr) {
         ADDRINT end = start + current->size;
         
         if (addr >= start && addr < end) {
-            // Found it! addr is within [start, start+size)
+            // Address is within [start, start+size)
             return current;
         } else if (addr < start) {
-            // addr is before this range, go left
+            // Address is before this range, go left
             current = current->left;
         } else {
-            // addr >= end, so it's after this range, go right
+            // Address lies beyond the current object (>= end), go right
             current = current->right;
         }
     }
@@ -106,6 +104,7 @@ Node *Registry::remove(ADDRINT key) {
             parent->right = nullptr;
         }
     }
+
     // Case 2: Node has only right child
     else if (current->left == nullptr) {
         if (parent == nullptr) {
@@ -117,6 +116,7 @@ Node *Registry::remove(ADDRINT key) {
             parent->right = current->right;
         }
     }
+
     // Case 3: Node has only left child
     else if (current->right == nullptr) {
         if (parent == nullptr) {
@@ -128,6 +128,7 @@ Node *Registry::remove(ADDRINT key) {
             parent->right = current->left;
         }
     }
+
     // Case 4: Node has both children
     else {
         // Find the in-order successor (smallest node in right subtree)

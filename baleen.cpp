@@ -3,81 +3,42 @@
 #include <ostream>
 #include <map>
 #include <optional>
+#include <types.h>
 #include <vector>
 
+#include "registry.h"
+
 #include "pin.H"
+#include "types_vmapi.PH"
 
 using std::cerr;
 using std::endl;
 using std::string;
+using std::ofstream;
+using std::map;
 
-// Output file for logging
-std::ofstream outFile;
+// Output file for logging.
+ofstream outFile;
 
-template<typename T>
-class RangeMap {
-private:
-    struct RangeValue {
-        ADDRINT end;
-        T value;
-    };
-    
-    std::map<ADDRINT, RangeValue> ranges;  // key: start of range
+// Maps every starting address to its object (name and size).
+Registry objects;  
 
-public:
-    void addRange(ADDRINT start, ADDRINT end, T value) {
-        ranges[start] = {end, value};
-    }
-    
-    std::optional<T> get(ADDRINT key) const {
-        auto it = ranges.upper_bound(key);
-        
-        if (it != ranges.begin()) {
-            --it;
-            if (key <= it->second.end) {
-                return it->second.value;
-            }
-        }
-        
-        return std::nullopt;
-    }
+// Maps the name of every object to its starting address.
+map<string, ADDRINT> starts; 
 
-    bool updateByKey(ADDRINT key, T newValue) {
-        auto it = ranges.upper_bound(key);
-        
-        if (it != ranges.begin()) {
-            --it;
-            if (key <= it->second.end) {
-                it->second.value = newValue;
-                return true;
-            }
-        }
-        return false;  // Key not in any range
-    }
-
-    bool removeRange(ADDRINT start) {
-        auto it = ranges.find(start);
-        if (it != ranges.end()) {
-            ranges.erase(it);
-            return true;
-        }
-        return false;
-    }
-};
-
-RangeMap<std::string> addressToName;  // Maps address ranges to object names
-std::map<std::string, ADDRINT> nameToRanges;  // Maps names to their start address
-std::map<std::string, int> nameToCount;  // Maps object names to read counts
+// Maps the name of every object to its read count.
+map<string, int> reads;
 
 VOID RecordMemRead(ADDRINT ip, ADDRINT addr) {
-    auto name = addressToName.get(addr);
+    auto node = objects.find(addr);
 
-    if (name) {
+    if (node) {
         outFile << "[PIN] Read at 0x" << std::hex << ip 
                 << ": address 0x" << addr 
-                << " (object: " << *name << ")" << std::dec << endl;
+                << " (object: " << node->object << ")" << std::dec << endl;
 
-        nameToCount[*name]++;  // Increment count for this object name
+        // Increment count for this object
+        reads[node->object]++;
     }
 }
 
@@ -110,12 +71,12 @@ VOID AfterScampiMark(ADDRINT callSite, ADDRINT returnValue, ADDRINT pointerArg, 
     }
 
     // Map the address range to the object name
-    addressToName.addRange(pointerArg, pointerArg + sizeArg - 1, objectName);
-    nameToRanges[objectName] = pointerArg;
+    objects.insert(pointerArg, sizeArg, objectName);
+    starts[objectName] = pointerArg;
     
     // Initialize the count for this object name (if not already present)
-    if (nameToCount.find(objectName) == nameToCount.end()) {
-        nameToCount[objectName] = 0;
+    if (reads.find(objectName) == reads.end()) {
+        reads[objectName] = 0;
     }
 
     std::cout << "Foo" << std::endl;
@@ -130,39 +91,47 @@ VOID AfterScampiMark(ADDRINT callSite, ADDRINT returnValue, ADDRINT pointerArg, 
     outFile.flush();
 }
 
-VOID AfterScampiUnregister(ADDRINT callSite, ADDRINT stringArg) {
-    // Read the string name
-    std::string objectName;
-    if (stringArg != 0) {
-        char buffer[256];
-        PIN_SafeCopy(buffer, (void*)stringArg, sizeof(buffer) - 1);
-        buffer[255] = '\0';
-        objectName = buffer;
-    } else {
-        objectName = "unnamed";
+// Global or thread-local storage for realloc args
+struct ReallocArgs {
+    ADDRINT addr;
+    USIZE size;
+};
+PIN_LOCK reallocLock;
+std::map<THREADID, ReallocArgs> pendingRealloc;
+
+VOID BeforeRealloc(THREADID tid, ADDRINT addr, USIZE size) {
+    PIN_GetLock(&reallocLock, tid);
+    pendingRealloc[tid] = {addr, size};
+    PIN_ReleaseLock(&reallocLock);
+}
+
+VOID AfterRealloc(THREADID tid, ADDRINT ret) {
+    PIN_GetLock(&reallocLock, tid);
+    auto args = pendingRealloc[tid];
+    PIN_ReleaseLock(&reallocLock);
+    
+    std::cout << "realloc(0x" << std::hex << args.addr << std::dec
+              << ", " << args.size
+              << ") → 0x" << std::hex << ret << std::dec << std::endl;
+}
+
+VOID BeforeFree(ADDRINT addr) {
+    std::cout << "free(" << std::hex << addr << std::dec
+              << ")" << std::endl;
+}
+
+template<typename... Args>
+void instrument(IMG img, const char* routineName, IPOINT ipoint, AFUNPTR analysisFunc, Args... args) {
+    RTN rtn = RTN_FindByName(img, routineName);
+    
+    if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        
+        RTN_InsertCall(rtn, ipoint, analysisFunc, args..., IARG_END);
+        
+        RTN_Close(rtn);
     }
-
-    outFile << "[PIN] _scampi_unregister called from: 0x" << std::hex << callSite << std::dec << endl;
-    outFile << "[PIN] Unregistering object: \"" << objectName << "\"" << endl;
-
-    // Look up the start address for this name
-    auto it = nameToRanges.find(objectName);
-    if (it != nameToRanges.end()) {
-        addressToName.removeRange(it->second);
-        nameToRanges.erase(it);
-    }
-
-    outFile.flush();
 }
-
-VOID AfterMemcpy(ADDRINT ret) {
-    std::cout << "memcpy called" << std::endl;
-}
-
-VOID AfterRealloc(ADDRINT ret) {
-    std::cout << "realloc called" << std::endl;
-}
-
 
 // Image instrumentation function called when each image is loaded
 VOID Image(IMG img, VOID *v) {
@@ -202,72 +171,25 @@ VOID Image(IMG img, VOID *v) {
             break;
         }
     }
-    
-    outFile << "[PIN] Searching for _scampi_unregister..." << endl;
-    SYM unregisterSym = SYM_Invalid();
-    for (SYM sym = IMG_RegsymHead(img); SYM_Valid(sym); sym = SYM_Next(sym)) {
-        string name = SYM_Name(sym);
-        if (name == "_scampi_unregister") {
-            outFile << "[PIN] Found symbol _scampi_unregister at 0x" 
-                    << std::hex << SYM_Address(sym) << std::dec << endl;
-            unregisterSym = sym;
-            
-            RTN rtn = RTN_FindByAddress(SYM_Address(sym));
-            if (RTN_Valid(rtn)) {
-                outFile << "[PIN] Got RTN from symbol: " << RTN_Name(rtn) << endl;
-                
-                RTN_Open(rtn);
-                RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)AfterScampiUnregister,
-                                IARG_RETURN_IP,
-                                IARG_REG_VALUE, REG_RDI,  // First argument (string pointer)
-                                IARG_END);
-                RTN_Close(rtn);
-                
-                outFile << "[PIN] *** Successfully instrumented _scampi_unregister!" << endl;
-            } else {
-                outFile << "[PIN] Could not get valid RTN from symbol address" << endl;
-            }
-            break;
-        }
-    }
-
-    if (!SYM_Valid(unregisterSym)) {
-        outFile << "[PIN] Symbol _scampi_unregister not found in symbol table" << endl;
-    }
 
     if (!SYM_Valid(scampiSym)) {
         outFile << "[PIN] Symbol _scampi_register not found in symbol table" << endl;
     }
 
-    // Find memcpy in the image
-    RTN memcpyRtn = RTN_FindByName(img, "memcpy");
-    
-    if (RTN_Valid(memcpyRtn)) {
-        RTN_Open(memcpyRtn);
-        
-        // Insert call after memcpy returns
-        RTN_InsertCall(memcpyRtn, IPOINT_AFTER, 
-                      (AFUNPTR)AfterMemcpy,
-                      IARG_FUNCRET_EXITPOINT_VALUE,
-                      IARG_END);
-        
-        RTN_Close(memcpyRtn);
-    }
+    instrument(img, "free", IPOINT_BEFORE,
+               (AFUNPTR)BeforeFree,
+               IARG_FUNCARG_ENTRYPOINT_VALUE, 0);
 
-    // Find realloc in the image
-    RTN reallocRtn = RTN_FindByName(img, "realloc");
-    
-    if (RTN_Valid(reallocRtn)) {
-        RTN_Open(reallocRtn);
-        
-        // Insert call after memcpy returns
-        RTN_InsertCall(reallocRtn, IPOINT_AFTER, 
-                      (AFUNPTR)AfterRealloc,
-                      IARG_FUNCRET_EXITPOINT_VALUE,
-                      IARG_END);
-        
-        RTN_Close(reallocRtn);
-    }
+    instrument(img, "realloc", IPOINT_BEFORE,
+               (AFUNPTR)BeforeRealloc,
+               IARG_THREAD_ID,
+               IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+               IARG_FUNCARG_ENTRYPOINT_VALUE, 1);
+
+    instrument(img, "realloc", IPOINT_AFTER,
+               (AFUNPTR)AfterRealloc,
+               IARG_THREAD_ID,
+               IARG_FUNCRET_EXITPOINT_VALUE);
     
     outFile << endl;
 }
@@ -276,7 +198,7 @@ VOID Image(IMG img, VOID *v) {
 VOID Fini(INT32 code, VOID *v) {
     outFile << "\n[PIN] ========== Read Count Summary ==========" << endl;
     
-    for (const auto& pair : nameToCount) {
+    for (const auto& pair : reads) {
         outFile << "[PIN] Object \"" << pair.first << "\": " 
                 << pair.second << " reads" << endl;
     }
