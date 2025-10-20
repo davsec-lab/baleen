@@ -2,6 +2,8 @@
 #include <fstream>
 #include <ostream>
 #include <map>
+#include <set>
+#include <stack>
 
 #include "pin.H"
 #include "registry.h"
@@ -11,29 +13,49 @@ using std::endl;
 using std::string;
 using std::ofstream;
 using std::map;
+using std::stack;
+using std::set;
 
 // Output file for logging.
-ofstream outFile;
+ofstream memFile;
 
 // Maps every starting address to its object (name and size).
-Registry objects;  
+Registry objects;
 
 // Maps the name of every object to its starting address.
-map<string, ADDRINT> starts; 
+map<string, ADDRINT> starts;
 
 // Maps the name of every object to its read count.
 map<string, int> reads;
+
+// Maps the name of every object to its write count.
+map<string, int> writes;
+
+set<string> skipFunctions = {"malloc", "realloc", "free", "baleen"};
 
 VOID RecordMemRead(ADDRINT ip, ADDRINT addr) {
     auto node = objects.find(addr);
 
     if (node) {
-        outFile << "[PIN] Read at 0x" << std::hex << ip 
-                << ": address 0x" << addr 
-                << " (object: " << node->object << ")" << std::dec << endl;
+        memFile << "[READ] Read from " << std::hex << addr 
+                << " ('" << node->object
+                << "')\n" << std::dec << endl;
 
         // Increment count for this object
         reads[node->object]++;
+    }
+}
+
+VOID RecordMemWrite(ADDRINT ip, ADDRINT addr) {
+    auto node = objects.find(addr);
+
+    if (node) {
+        memFile << "[WRITE] Write to " << std::hex << addr 
+                << " ('" << node->object
+                << "')\n" << std::dec << endl;
+
+        // Increment count for this object
+        writes[node->object]++;
     }
 }
 
@@ -45,6 +67,14 @@ VOID Instruction(INS ins, VOID *v) {
         if (INS_MemoryOperandIsRead(ins, memOp)) {
             INS_InsertPredicatedCall(
                 ins, IPOINT_BEFORE, (AFUNPTR)RecordMemRead,
+                IARG_INST_PTR,
+                IARG_MEMORYOP_EA, memOp,
+                IARG_END);
+        }
+
+        if (INS_MemoryOperandIsWritten(ins, memOp)) {
+            INS_InsertPredicatedCall(
+                ins, IPOINT_BEFORE, (AFUNPTR)RecordMemWrite,
                 IARG_INST_PTR,
                 IARG_MEMORYOP_EA, memOp,
                 IARG_END);
@@ -69,18 +99,19 @@ VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
     objects.insert(addr, size, objectName);
     starts[objectName] = addr;
     
-    // Initialize the count for this object name (if not already present)
+    // Initialize the counts for this object name (if not already present)
     if (reads.find(objectName) == reads.end()) {
         reads[objectName] = 0;
+        writes[objectName] = 0;
     }
 
-    outFile << "Object '" << objectName
+    memFile << "[BEFORE BALEEN] Object '" << objectName
             << "' occupies " << size
             << " bytes in range [0x" << std::hex << addr
             << ", 0x" << addr + size
-            << ")" << std::dec << std::endl;
+            << ")\n" << std::dec << std::endl;
 
-    outFile.flush();
+    memFile.flush();
 }
 
 // Global or thread-local storage for realloc args
@@ -110,18 +141,18 @@ VOID AfterRealloc(THREADID tid, ADDRINT ret) {
     Node *node = objects.remove(args.addr);
 
     if (node) {
-        outFile << "Object '" << node->object
+        memFile << "[AFTER REALLOC] Object '" << node->object
                 << "' was reallocated!" << std::endl;
         
-        outFile << "+ " << node->size
-                << " → " << args.size
-                << " bytes" << std::endl;
-        
-        outFile << "+ [0x" << std::hex << node->start
+        memFile << "[AFTER REALLOC] - [0x" << std::hex << node->start
                 << ", 0x" << node->start + node->size
                 << ") → [0x" << ret
                 << ", 0x" << ret + args.size
                 << ")" << std::dec << std::endl;
+        
+        memFile << "[AFTER REALLOC] - " << node->size
+                << " → " << args.size
+                << " bytes\n" << std::endl;
         
         objects.insert(ret, args.size, node->object);
         starts[node->object] = ret;
@@ -132,10 +163,10 @@ VOID BeforeFree(ADDRINT addr) {
     Node *removed = objects.remove(addr);
 
     if (removed) {
-        outFile << "Object '" << removed->object
+        memFile << "[BEFORE FREE] Object '" << removed->object
                 << "' is no longer mapped to range [0x" << std::hex << removed->start
                 << ", 0x" << removed->start + removed->size
-                << ")" << std::dec << std::endl;
+                << ")\n" << std::dec << std::endl;
         
         // TODO: Is this a good way to handle the start address mapping?
         starts[removed->object] = 0;
@@ -158,10 +189,72 @@ void instrument(IMG img, const char* routineName, IPOINT ipoint, AFUNPTR analysi
     }
 }
 
+enum Language {
+    RUST,
+    C
+};
+
+PIN_LOCK languageLock;
+
+map<THREADID, stack<Language>> languageStack;
+
+VOID PushLanguage(THREADID tid, Language lang) {
+    PIN_GetLock(&languageLock, tid);
+    languageStack[tid].push(lang);
+    PIN_ReleaseLock(&languageLock);
+}
+
+VOID PopLanguage(THREADID tid) {
+    PIN_GetLock(&languageLock, tid);
+
+    if (!languageStack[tid].empty()) {
+        languageStack[tid].pop();
+    }
+
+    PIN_ReleaseLock(&languageLock);
+}
+
+VOID BeforeMalloc(THREADID tid, USIZE size) {
+    memFile << "[BEFORE MALLOC] " << size
+            << " bytes requested by " << (languageStack[tid].top() == RUST ? "Rust" : "C")
+            << "\n" << std::endl;
+}
+
 // Image instrumentation function called when each image is loaded
 VOID Image(IMG img, VOID *v) {
-    outFile << "[PIN] Loading image: " << IMG_Name(img) << endl;
-    outFile << "[PIN] Load offset: 0x" << std::hex << IMG_LoadOffset(img) << std::dec << endl;
+    memFile << "[PIN] Loading image: " << IMG_Name(img) << endl;
+    memFile << "[PIN] Load offset: 0x" << std::hex << IMG_LoadOffset(img) << std::dec << endl;
+
+    Language lang = Language::C;
+
+    if (IMG_IsMainExecutable(img)) {
+        // This is the Rust binary being executed
+        lang = Language::RUST;
+    }
+
+    // Instrument all routines in the main executable
+    for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec)) {
+        for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
+            string rtnName = RTN_Name(rtn);
+
+            if (skipFunctions.find(rtnName) != skipFunctions.end()) {
+                continue;
+            }
+
+            RTN_Open(rtn);
+            
+            RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)PushLanguage,
+                          IARG_THREAD_ID,
+                          IARG_UINT32, lang,
+                          IARG_END);
+            
+            RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)PopLanguage,
+                          IARG_THREAD_ID,
+                          IARG_END);
+            
+            RTN_Close(rtn);
+        }
+    }
 
     instrument(img, "baleen", IPOINT_BEFORE,
                (AFUNPTR)BeforeBaleen,
@@ -171,6 +264,11 @@ VOID Image(IMG img, VOID *v) {
 
     instrument(img, "free", IPOINT_BEFORE,
                (AFUNPTR)BeforeFree,
+               IARG_FUNCARG_ENTRYPOINT_VALUE, 0);
+
+    instrument(img, "malloc", IPOINT_BEFORE,
+               (AFUNPTR)BeforeMalloc,
+               IARG_THREAD_ID,
                IARG_FUNCARG_ENTRYPOINT_VALUE, 0);
 
     instrument(img, "realloc", IPOINT_BEFORE,
@@ -184,21 +282,21 @@ VOID Image(IMG img, VOID *v) {
                IARG_THREAD_ID,
                IARG_FUNCRET_EXITPOINT_VALUE);
     
-    outFile << endl;
+    memFile << endl;
 }
 
 // Finalization function
 VOID Fini(INT32 code, VOID *v) {
-    outFile << "\n[PIN] ========== Read Count Summary ==========" << endl;
+    memFile << "[PIN] ========== Read Count Summary ==========" << endl;
     
     for (const auto& pair : reads) {
-        outFile << "[PIN] Object \"" << pair.first << "\": " 
+        memFile << "[PIN] Object \"" << pair.first << "\": " 
                 << pair.second << " reads" << endl;
     }
     
-    outFile << "[PIN] ==========================================" << endl;
-    outFile << "[PIN] Instrumentation finished" << endl;
-    outFile.close();
+    memFile << "[PIN] ==========================================" << endl;
+    memFile << "[PIN] Instrumentation finished" << endl;
+    memFile.close();
 }
 
 // Print usage information
@@ -218,8 +316,8 @@ int main(int argc, char *argv[]) {
         return Usage();
     }
     
-    // Open output file
-    outFile.open("trace.baleen");
+    // Open output files
+    memFile.open("memory.baleen");
     
     // Register image instrumentation callback
     IMG_AddInstrumentFunction(Image, 0);
