@@ -2,14 +2,9 @@
 #include <fstream>
 #include <ostream>
 #include <map>
-#include <optional>
-#include <types.h>
-#include <vector>
-
-#include "registry.h"
 
 #include "pin.H"
-#include "types_vmapi.PH"
+#include "registry.h"
 
 using std::cerr;
 using std::endl;
@@ -58,12 +53,12 @@ VOID Instruction(INS ins, VOID *v) {
 }
 
 // Analysis function called after _scampi_register returns
-VOID AfterScampiMark(ADDRINT callSite, ADDRINT returnValue, ADDRINT pointerArg, ADDRINT sizeArg, ADDRINT stringArg) {
+VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
     // Read the string name
     std::string objectName;
-    if (stringArg != 0) {
+    if (name != 0) {
         char buffer[256];
-        PIN_SafeCopy(buffer, (void*)stringArg, sizeof(buffer) - 1);
+        PIN_SafeCopy(buffer, (void*)name, sizeof(buffer) - 1);
         buffer[255] = '\0';
         objectName = buffer;
     } else {
@@ -71,22 +66,19 @@ VOID AfterScampiMark(ADDRINT callSite, ADDRINT returnValue, ADDRINT pointerArg, 
     }
 
     // Map the address range to the object name
-    objects.insert(pointerArg, sizeArg, objectName);
-    starts[objectName] = pointerArg;
+    objects.insert(addr, size, objectName);
+    starts[objectName] = addr;
     
     // Initialize the count for this object name (if not already present)
     if (reads.find(objectName) == reads.end()) {
         reads[objectName] = 0;
     }
 
-    std::cout << "Foo" << std::endl;
-
-    outFile << "[PIN] _scampi_register called from: 0x" << std::hex << callSite
-            << ", return value: 0x" << returnValue << std::dec << endl;
-    
-    outFile << "[PIN] Pointer argument: 0x" << std::hex << pointerArg << std::dec << endl;
-    outFile << "[PIN] Size argument: 0x" << std::hex << sizeArg << std::dec << endl;
-    outFile << "[PIN] Object name: \"" << objectName << "\"" << endl;
+    outFile << "Object '" << objectName
+            << "' occupies " << size
+            << " bytes in range [0x" << std::hex << addr
+            << ", 0x" << addr + size
+            << ")" << std::dec << std::endl;
 
     outFile.flush();
 }
@@ -96,6 +88,7 @@ struct ReallocArgs {
     ADDRINT addr;
     USIZE size;
 };
+
 PIN_LOCK reallocLock;
 std::map<THREADID, ReallocArgs> pendingRealloc;
 
@@ -113,10 +106,42 @@ VOID AfterRealloc(THREADID tid, ADDRINT ret) {
     std::cout << "realloc(0x" << std::hex << args.addr << std::dec
               << ", " << args.size
               << ") → 0x" << std::hex << ret << std::dec << std::endl;
+    
+    Node *node = objects.remove(args.addr);
+
+    if (node) {
+        outFile << "Object '" << node->object
+                << "' was reallocated!" << std::endl;
+        
+        outFile << "+ " << node->size
+                << " → " << args.size
+                << " bytes" << std::endl;
+        
+        outFile << "+ [0x" << std::hex << node->start
+                << ", 0x" << node->start + node->size
+                << ") → [0x" << ret
+                << ", 0x" << ret + args.size
+                << ")" << std::dec << std::endl;
+        
+        objects.insert(ret, args.size, node->object);
+        starts[node->object] = ret;
+    }
 }
 
 VOID BeforeFree(ADDRINT addr) {
-    std::cout << "free(" << std::hex << addr << std::dec
+    Node *removed = objects.remove(addr);
+
+    if (removed) {
+        outFile << "Object '" << removed->object
+                << "' is no longer mapped to range [0x" << std::hex << removed->start
+                << ", 0x" << removed->start + removed->size
+                << ")" << std::dec << std::endl;
+        
+        // TODO: Is this a good way to handle the start address mapping?
+        starts[removed->object] = 0;
+    }
+
+    std::cout << "free(0x" << std::hex << addr << std::dec
               << ")" << std::endl;
 }
 
@@ -137,44 +162,12 @@ void instrument(IMG img, const char* routineName, IPOINT ipoint, AFUNPTR analysi
 VOID Image(IMG img, VOID *v) {
     outFile << "[PIN] Loading image: " << IMG_Name(img) << endl;
     outFile << "[PIN] Load offset: 0x" << std::hex << IMG_LoadOffset(img) << std::dec << endl;
-    
-    // Method 1: Iterate through symbols to find _scampi_register
-    outFile << "[PIN] Searching through symbols..." << endl;
-    SYM scampiSym = SYM_Invalid();
-    for (SYM sym = IMG_RegsymHead(img); SYM_Valid(sym); sym = SYM_Next(sym)) {
-        string name = SYM_Name(sym);
-        if (name == "_scampi_register") {
-            outFile << "[PIN] Found symbol _scampi_register at 0x" 
-                    << std::hex << SYM_Address(sym) << std::dec << endl;
-            scampiSym = sym;
-            
-            // Try to get RTN from the symbol's address
-            RTN rtn = RTN_FindByAddress(SYM_Address(sym));
-            if (RTN_Valid(rtn)) {
-                outFile << "[PIN] Got RTN from symbol: " << RTN_Name(rtn) << endl;
-                
-                RTN_Open(rtn);
-                RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)AfterScampiMark,
-                                IARG_RETURN_IP,
-                                IARG_FUNCRET_EXITPOINT_VALUE,
-                                IARG_REG_VALUE, REG_RDI,  // First argument (pointer)
-                                IARG_REG_VALUE, REG_RSI,  // Second argument (size)
-                                IARG_REG_VALUE, REG_RDX,  // Third argument (string pointer)
-                                IARG_END);
-                  
-                RTN_Close(rtn);
-                
-                outFile << "[PIN] *** Successfully instrumented via symbol!" << endl;
-            } else {
-                outFile << "[PIN] Could not get valid RTN from symbol address" << endl;
-            }
-            break;
-        }
-    }
 
-    if (!SYM_Valid(scampiSym)) {
-        outFile << "[PIN] Symbol _scampi_register not found in symbol table" << endl;
-    }
+    instrument(img, "baleen", IPOINT_BEFORE,
+               (AFUNPTR)BeforeBaleen,
+               IARG_FUNCARG_ENTRYPOINT_VALUE, 0,  // Address
+               IARG_FUNCARG_ENTRYPOINT_VALUE, 1,  // Size
+               IARG_FUNCARG_ENTRYPOINT_VALUE, 2); // Name
 
     instrument(img, "free", IPOINT_BEFORE,
                (AFUNPTR)BeforeFree,
@@ -226,7 +219,7 @@ int main(int argc, char *argv[]) {
     }
     
     // Open output file
-    outFile.open("scampi_trace.out");
+    outFile.open("trace.baleen");
     
     // Register image instrumentation callback
     IMG_AddInstrumentFunction(Image, 0);
