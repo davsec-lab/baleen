@@ -16,8 +16,21 @@ using std::map;
 using std::stack;
 using std::set;
 
+enum Language {
+    RUST,
+    C
+};
+
+PIN_LOCK languageLock;
+
+set<string> c_functions;
+
+map<THREADID, stack<Language>> languageStack;
+
 // Output file for logging.
 ofstream memFile;
+
+ofstream outFile;
 
 // Maps every starting address to its object (name and size).
 Registry objects;
@@ -26,36 +39,44 @@ Registry objects;
 map<string, ADDRINT> starts;
 
 // Maps the name of every object to its read count.
-map<string, int> reads;
+map<string, map<Language, int>> reads;
 
 // Maps the name of every object to its write count.
-map<string, int> writes;
+map<string, map<Language, int>> writes;
 
 set<string> skipFunctions = {"malloc", "realloc", "free", "baleen"};
 
-VOID RecordMemRead(ADDRINT ip, ADDRINT addr) {
+VOID RecordMemRead(THREADID tid, ADDRINT ip, ADDRINT addr) {
     auto node = objects.find(addr);
 
     if (node) {
+        PIN_GetLock(&languageLock, tid);
+        Language currentLang = languageStack[tid].empty() ? Language::C : languageStack[tid].top();
+        PIN_ReleaseLock(&languageLock);
+        
         memFile << "[READ] Read from " << std::hex << addr 
                 << " ('" << node->object
                 << "')\n" << std::dec << endl;
 
         // Increment count for this object
-        reads[node->object]++;
+        reads[node->object][currentLang]++;
     }
 }
 
-VOID RecordMemWrite(ADDRINT ip, ADDRINT addr) {
+VOID RecordMemWrite(THREADID tid, ADDRINT ip, ADDRINT addr) {
     auto node = objects.find(addr);
 
     if (node) {
+        PIN_GetLock(&languageLock, tid);
+        Language currentLang = languageStack[tid].empty() ? Language::C : languageStack[tid].top();
+        PIN_ReleaseLock(&languageLock);
+        
         memFile << "[WRITE] Write to " << std::hex << addr 
                 << " ('" << node->object
                 << "')\n" << std::dec << endl;
 
         // Increment count for this object
-        writes[node->object]++;
+        writes[node->object][currentLang]++;
     }
 }
 
@@ -67,6 +88,7 @@ VOID Instruction(INS ins, VOID *v) {
         if (INS_MemoryOperandIsRead(ins, memOp)) {
             INS_InsertPredicatedCall(
                 ins, IPOINT_BEFORE, (AFUNPTR)RecordMemRead,
+                IARG_THREAD_ID,  // Add this
                 IARG_INST_PTR,
                 IARG_MEMORYOP_EA, memOp,
                 IARG_END);
@@ -75,6 +97,7 @@ VOID Instruction(INS ins, VOID *v) {
         if (INS_MemoryOperandIsWritten(ins, memOp)) {
             INS_InsertPredicatedCall(
                 ins, IPOINT_BEFORE, (AFUNPTR)RecordMemWrite,
+                IARG_THREAD_ID,  // Add this
                 IARG_INST_PTR,
                 IARG_MEMORYOP_EA, memOp,
                 IARG_END);
@@ -82,7 +105,6 @@ VOID Instruction(INS ins, VOID *v) {
     }
 }
 
-// Analysis function called after _scampi_register returns
 VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
     // Read the string name
     std::string objectName;
@@ -101,8 +123,14 @@ VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
     
     // Initialize the counts for this object name (if not already present)
     if (reads.find(objectName) == reads.end()) {
-        reads[objectName] = 0;
-        writes[objectName] = 0;
+        reads[objectName] = {};
+        writes[objectName] = {};
+
+        reads[objectName][Language::C] = 0;
+        reads[objectName][Language::RUST] = 0;
+
+        writes[objectName][Language::C] = 0;
+        writes[objectName][Language::RUST] = 0;
     }
 
     memFile << "[BEFORE BALEEN] Object '" << objectName
@@ -189,15 +217,6 @@ void instrument(IMG img, const char* routineName, IPOINT ipoint, AFUNPTR analysi
     }
 }
 
-enum Language {
-    RUST,
-    C
-};
-
-PIN_LOCK languageLock;
-
-map<THREADID, stack<Language>> languageStack;
-
 VOID PushLanguage(THREADID tid, Language lang) {
     PIN_GetLock(&languageLock, tid);
     languageStack[tid].push(lang);
@@ -220,10 +239,19 @@ VOID BeforeMalloc(THREADID tid, USIZE size) {
             << "\n" << std::endl;
 }
 
+string exportCSV() {
+    string sheet = "";
+
+    return sheet;
+}
+
 // Image instrumentation function called when each image is loaded
 VOID Image(IMG img, VOID *v) {
     memFile << "[PIN] Loading image: " << IMG_Name(img) << endl;
     memFile << "[PIN] Load offset: 0x" << std::hex << IMG_LoadOffset(img) << std::dec << endl;
+
+    outFile << "[PIN] Loading image: " << IMG_Name(img) << endl;
+    outFile << "[PIN] Load offset: 0x" << std::hex << IMG_LoadOffset(img) << std::dec << endl;
 
     Language lang = Language::C;
 
@@ -237,16 +265,20 @@ VOID Image(IMG img, VOID *v) {
         for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
             string rtnName = RTN_Name(rtn);
 
+            outFile << "Instrumenting " << rtnName << std::endl;
+
             if (skipFunctions.find(rtnName) != skipFunctions.end()) {
                 continue;
             }
 
             RTN_Open(rtn);
+
+            Language l = c_functions.count(rtnName) == 1 ? Language::C : lang;
             
             RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR)PushLanguage,
-                          IARG_THREAD_ID,
-                          IARG_UINT32, lang,
-                          IARG_END);
+              IARG_THREAD_ID,
+              IARG_UINT32, l,
+              IARG_END);
             
             RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR)PopLanguage,
                           IARG_THREAD_ID,
@@ -287,16 +319,61 @@ VOID Image(IMG img, VOID *v) {
 
 // Finalization function
 VOID Fini(INT32 code, VOID *v) {
-    memFile << "[PIN] ========== Read Count Summary ==========" << endl;
+    memFile << "========== Access Summary ==========" << endl;
     
+    // Print statistics for each object
     for (const auto& pair : reads) {
-        memFile << "[PIN] Object \"" << pair.first << "\": " 
-                << pair.second << " reads" << endl;
+        const string& objName = pair.first;
+        
+        memFile << "Object \"" << objName << "\":" << endl;
+        
+        // Read counts
+        int rustReads = reads[objName][Language::RUST];
+        int cReads = reads[objName][Language::C];
+        
+        memFile << "  Reads  - Rust: " << rustReads 
+                << ", C: " << cReads 
+                << ", Total: " << (rustReads + cReads) << endl;
+        
+        // Write counts
+        int rustWrites = writes[objName][Language::RUST];
+        int cWrites = writes[objName][Language::C];
+        
+        memFile << "  Writes - Rust: " << rustWrites 
+                << ", C: " << cWrites 
+                << ", Total: " << (rustWrites + cWrites) << endl;
+        
+        memFile << endl;
     }
     
-    memFile << "[PIN] ==========================================" << endl;
-    memFile << "[PIN] Instrumentation finished" << endl;
+    memFile << "==========================================" << endl;
+    memFile << "Instrumentation finished" << endl;
     memFile.close();
+
+    // Export CSV
+    ofstream csv;
+
+    csv.open("baleen.csv");
+
+    csv << "Name, Reads (Rust), Reads (C), Writes (Rust), Writes (C)" << std::endl;
+
+    for (const auto& pair : reads) {
+        const string& objName = pair.first;
+
+        csv << objName << ", ";
+
+        int rustReads = reads[objName][Language::RUST];
+        int cReads = reads[objName][Language::C];
+
+        csv << rustReads << ", " << cReads << ", ";
+
+        int rustWrites = writes[objName][Language::RUST];
+        int cWrites = writes[objName][Language::C];
+
+        csv << rustWrites << ", " << cWrites << std::endl;
+    }
+
+    csv.close();
 }
 
 // Print usage information
@@ -318,6 +395,22 @@ int main(int argc, char *argv[]) {
     
     // Open output files
     memFile.open("memory.baleen");
+    outFile.open("functions.baleen");
+
+    // Get C functions
+    std::ifstream file("c-functions.txt");
+    
+    if (!file.is_open()) {
+        std::cerr << "Error: Could not open file c-functions.txt" << std::endl;
+        return 1;
+    }
+    
+    std::string line;
+    while (std::getline(file, line)) {
+        c_functions.insert(line);
+    }
+    
+    file.close();
     
     // Register image instrumentation callback
     IMG_AddInstrumentFunction(Image, 0);
