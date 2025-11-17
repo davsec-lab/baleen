@@ -1,3 +1,5 @@
+// registry.cpp
+
 #include "registry.h"
 
 Registry::Registry() : root(nullptr) {}

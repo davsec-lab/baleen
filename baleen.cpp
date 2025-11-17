@@ -1,3 +1,5 @@
+// baleen.cpp
+
 #include <iostream>
 #include <fstream>
 #include <ostream>
@@ -187,6 +189,8 @@ VOID AfterRealloc(THREADID tid, ADDRINT ret) {
     }
 }
 
+int freed[2] = { 0, 0 };
+
 VOID BeforeFree(ADDRINT addr) {
     Node *removed = objects.remove(addr);
 
@@ -233,10 +237,40 @@ VOID PopLanguage(THREADID tid) {
     PIN_ReleaseLock(&languageLock);
 }
 
+int malloced[2] = { 0, 0 };
+
+std::map<THREADID, std::pair<Language, USIZE>> pendingMalloc;
+PIN_LOCK mallocLock;
+
 VOID BeforeMalloc(THREADID tid, USIZE size) {
+    PIN_GetLock(&languageLock, tid);
+    Language l = languageStack[tid].empty() ? Language::C : languageStack[tid].top();
+    PIN_ReleaseLock(&languageLock);
+    
     memFile << "[BEFORE MALLOC] " << size
-            << " bytes requested by " << (languageStack[tid].top() == RUST ? "Rust" : "C")
+            << " bytes requested by " << (l == RUST ? "Rust" : "C")
             << "\n" << std::endl;
+    
+    // Queue the allocation instead of applying it immediately
+    PIN_GetLock(&mallocLock, tid);
+    pendingMalloc[tid] = {l, size};
+    PIN_ReleaseLock(&mallocLock);
+}
+
+VOID AfterMalloc(THREADID tid, ADDRINT ret) {
+    PIN_GetLock(&mallocLock, tid);
+    auto pending = pendingMalloc[tid];
+    PIN_ReleaseLock(&mallocLock);
+    
+    // Only count if malloc succeeded (returned non-NULL)
+    if (ret != 0) {
+        Language l = pending.first;
+        USIZE size = pending.second;
+        
+        PIN_GetLock(&languageLock, tid);
+        malloced[l] += size;
+        PIN_ReleaseLock(&languageLock);
+    }
 }
 
 string exportCSV() {
@@ -265,11 +299,11 @@ VOID Image(IMG img, VOID *v) {
         for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
             string rtnName = RTN_Name(rtn);
 
-            outFile << "Instrumenting " << rtnName << std::endl;
-
             if (skipFunctions.find(rtnName) != skipFunctions.end()) {
                 continue;
             }
+
+            outFile << "Instrumenting " << rtnName << std::endl;
 
             RTN_Open(rtn);
 
@@ -302,6 +336,11 @@ VOID Image(IMG img, VOID *v) {
                (AFUNPTR)BeforeMalloc,
                IARG_THREAD_ID,
                IARG_FUNCARG_ENTRYPOINT_VALUE, 0);
+
+    instrument(img, "malloc", IPOINT_AFTER,
+               (AFUNPTR)AfterMalloc,
+               IARG_THREAD_ID,
+               IARG_FUNCRET_EXITPOINT_VALUE);
 
     instrument(img, "realloc", IPOINT_BEFORE,
                (AFUNPTR)BeforeRealloc,
@@ -353,7 +392,7 @@ VOID Fini(INT32 code, VOID *v) {
     // Export CSV
     ofstream csv;
 
-    csv.open("baleen.csv");
+    csv.open("baleen-objects.csv");
 
     csv << "Name, Reads (Rust), Reads (C), Writes (Rust), Writes (C)" << std::endl;
 
@@ -372,6 +411,15 @@ VOID Fini(INT32 code, VOID *v) {
 
         csv << rustWrites << ", " << cWrites << std::endl;
     }
+
+    csv.close();
+
+    // Export allocation information
+    csv.open("baleen-allocs.csv");
+
+    csv << "Malloced (Rust), Malloced (C), Malloced (Total)" << std::endl;
+
+    csv << malloced[Language::RUST] << ", " << malloced[Language::C] << ", " << malloced[Language::RUST] + malloced[Language::C] << std::endl;
 
     csv.close();
 }
