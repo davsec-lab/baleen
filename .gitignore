@@ -1,3 +1,5 @@
 obj-intel64
 pin.log
 .clangd
+.cache
+output.txt
