@@ -16,8 +16,11 @@ enum class Language { RUST, C, SHARED };
 
 map<THREADID, stack<Language>> language;
 ofstream messages;
+ofstream calls;
 
-string languageToString(Language lang) {
+static set<string> rtn_names; 
+
+string LanguageToString(Language lang) {
     switch (lang) {
     case Language::RUST:
         return "RUST";
@@ -28,7 +31,7 @@ string languageToString(Language lang) {
     }
 }
 
-bool endsWith(std::string_view s, std::string_view suffix) {
+BOOL EndsWith(std::string_view s, std::string_view suffix) {
     if (s.length() < suffix.length()) {
         // String is too short
         return false;
@@ -39,7 +42,7 @@ bool endsWith(std::string_view s, std::string_view suffix) {
     return s.substr(start_pos) == suffix;
 }
 
-bool isRustModern(const string& name) {
+BOOL IsRustModern(const string& name) {
     size_t len = name.length();
 
     // Is the name long enough for the suffix?
@@ -73,16 +76,12 @@ bool isRustModern(const string& name) {
     return true;
 }
 
-bool isRustLegacy(const string& name) {
+BOOL IsRustLegacy(const string& name) {
     return name.find("___rust") != string::npos;
 }
 
-bool isRustRuntime(const string& name) {
-    if (endsWith(name, "@plt")) {
-        return true;
-    }
-
-    static const set<string> functions = {
+BOOL IsRuntime(const string& name) {
+    static const set<string> names = {
         "_start",
         "deregister_tm_clones",
         "register_tm_clones",
@@ -90,16 +89,25 @@ bool isRustRuntime(const string& name) {
         "frame_dummy",
         "main",
         "rust_eh_personality",
+        ".init",
         "_init",
+        ".fini",
         "_fini",
         ".plt",
+        ".plt.got",
+        ".plt.sec",
+        ".text",
     };
 
-    return functions.count(name) > 0;
+    return names.count(name) > 0;
 }
 
-bool isRust(const string& name) {
-    return isRustModern(name) || isRustLegacy(name) || isRustRuntime(name);
+BOOL IsStub(const string& name) {
+    return EndsWith(name, "@plt");
+}
+
+BOOL IsRust(const string& name) {
+    return IsRustModern(name) || IsRustLegacy(name);
 }
 
 INT32 Usage() {
@@ -108,45 +116,87 @@ INT32 Usage() {
     return -1;
 }
 
-VOID enterRust(THREADID tid) {
-    language[tid].push(Language::RUST);
-}
-
-VOID enterC(THREADID tid) {
+VOID EnterC(THREADID tid, const string* rtnName) {
+    calls << "Entering " << *rtnName << " (C)" << endl;
     language[tid].push(Language::C);
+    calls << "Done" << endl;
 }
 
-VOID leaveLanguage(THREADID tid) {
+VOID EnterRust(THREADID tid, const string* rtnName) {
+    calls << "Entering " << *rtnName << " (RUST)" << endl;
+    language[tid].push(Language::RUST);
+    calls << "Done" << endl;
+}
+
+VOID LeaveLanguage(THREADID tid, const string* rtnName) {
+    calls << "Leaving " << *rtnName << endl;
     language[tid].pop();
+    calls << "Done" << endl;
+}
+
+BOOL IMG_IsVdso(IMG img) {
+    string imgName = IMG_Name(img);
+
+    // Check for common vDSO names
+    static const set<string> names = {
+        "[vdso]",
+        "[linux-gate.so.1]",
+        "[linux-vdso.so.1]"
+    };
+
+    return names.count(imgName) > 0;
+}
+
+Language RTN_Language(IMG img, RTN rtn) {
+    if (IMG_IsInterpreter(img) || IMG_IsVdso(img)) {
+        return Language::SHARED;
+    }
+
+    string rtnName = RTN_Name(rtn);
+
+    if (IsStub(rtnName) || IsRuntime(rtnName)) {
+        return Language::SHARED;
+    }
+
+    if (IMG_IsMainExecutable(img)) {
+        return IsRust(rtnName) ? Language::RUST : Language::C;
+    }
+
+    return Language::C;
 }
 
 VOID Image(IMG img, VOID *v) {
     messages << "Loading image... " << IMG_Name(img) << endl;
 
-    bool isMain = IMG_IsMainExecutable(img);
-
     for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec)) {
         for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
             string rtnName = RTN_Name(rtn);
 
-            Language lang = Language::SHARED;
+            // Determine the routine language
+            Language language = RTN_Language(img, rtn);
 
-            if (isMain) {
-                lang = isRust(rtnName) ? Language::RUST : Language::C;
-            }
+            messages << "Inspecting " << rtnName << " (" << LanguageToString(language) << ")" << endl;
 
-            messages << "Inspecting " << rtnName << " (" << languageToString(lang) << ")" << endl;
-
-            // Instrument the routine
             RTN_Open(rtn);
 
-            // RTN_InsertCall(rtn, ipoint, analysisFunc, args..., IARG_END);
+            if (language != Language::SHARED) {
+                auto EnterLanguage = language == Language::RUST ? EnterRust : EnterC;
 
-            if (lang != Language::SHARED) {
-                auto enterLanguage = lang == Language::RUST ? enterRust : enterC;
+                // Insert the routine name into our set to get a stable pointer
+                auto it = rtn_names.insert(rtnName);
+                const string* rtnNamePtr = &(*it.first);
+
+                // Insert call at entry
+                RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) EnterLanguage,
+                               IARG_THREAD_ID,
+                               IARG_PTR, rtnNamePtr,
+                               IARG_END);
                 
-                RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) enterLanguage, IARG_THREAD_ID, IARG_END);
-                RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR) leaveLanguage, IARG_THREAD_ID, IARG_END);
+                // Insert call at exit
+                RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR) LeaveLanguage,
+                               IARG_THREAD_ID,
+                               IARG_PTR, rtnNamePtr,
+                               IARG_END);
             }
 
             RTN_Close(rtn);
@@ -165,8 +215,9 @@ int main(int argc, char *argv[]) {
         return Usage();
     }
 
-    // Open logging file
-    messages.open("baleen.log");
+    // Open logging files
+    messages.open("baleen-messages.log");
+    calls.open("baleen-calls.log");
 
     // Register image instrumentation callback
     IMG_AddInstrumentFunction(Image, 0);
@@ -174,8 +225,9 @@ int main(int argc, char *argv[]) {
     // Start the program
     PIN_StartProgram();
 
-    // Close logging file
+    // Close logging files
     messages.close();
+    calls.close();
 
     return 0;
 }
