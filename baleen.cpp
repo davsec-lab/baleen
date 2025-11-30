@@ -1,20 +1,34 @@
 #include "pin.H"
-
 #include <iostream>
 #include <fstream>
 #include <set>
+#include <map> // --- NEW --- Include map
 
 using std::map;
-using std::stack;
 using std::set;
 using std::string;
 using std::cerr;
 using std::endl;
 using std::ofstream;
 
-enum class Language { RUST, C, SHARED };
+enum class Language {
+    SHARED, // Value = 0, which is std::map's default for new keys
+    RUST,
+    C
+};
 
-map<THREADID, stack<Language>> language;
+// --- REPLACED ---
+// static TLS_KEY tls_key; // No longer using TLS
+static PIN_LOCK global_lock; // Use a global lock for our map
+static map<THREADID, Language> thread_states; // Global map to store thread state
+
+// --- NEW ---
+// Global counters for memory allocation
+static UINT64 bytes_allocated_rust = 0;
+static UINT64 bytes_allocated_c = 0;
+static UINT64 bytes_allocated_shared = 0;
+
+
 ofstream messages;
 ofstream calls;
 
@@ -31,48 +45,23 @@ string LanguageToString(Language lang) {
     }
 }
 
+// All helper functions (EndsWith, IsRustModern, IsRustLegacy, IsRuntime, IsStub, IsRust)
+// remain exactly the same as in your original code.
 BOOL EndsWith(std::string_view s, std::string_view suffix) {
-    if (s.length() < suffix.length()) {
-        // String is too short
-        return false;
-    }
-
-    // Extract the substring starting from the position that would be the beginning of the suffix
+    if (s.length() < suffix.length()) return false;
     size_t start_pos = s.length() - suffix.length();
     return s.substr(start_pos) == suffix;
 }
 
 BOOL IsRustModern(const string& name) {
     size_t len = name.length();
-
-    // Is the name long enough for the suffix?
-    if (len < 19) {
-        return false;
-    }
-
-    // Is there an "E" at the end?
-    if (name[len - 1] != 'E') {
-        return false;
-    }
-
-    // Does the hash have a "17h" prefix?
-    if (name[len - 20] != '1' || name[len - 19] != '7' || name[len - 18] != 'h') {
-        return false;
-    }
-    
-    // Are the last 16 characters hexadecimal?
+    if (len < 19) return false;
+    if (name[len - 1] != 'E') return false;
+    if (name[len - 20] != '1' || name[len - 19] != '7' || name[len - 18] != 'h') return false;
     for (size_t i = len - 17; i < len - 1; ++i) {
-        if (!std::isxdigit(static_cast<unsigned char>(name[i]))) {
-            return false;
-        }
+        if (!std::isxdigit(static_cast<unsigned char>(name[i]))) return false;
     }
-
-    // Does the name use the Itanium ABI prefix?
-    if (name.rfind("_ZN", 0) != 0) {
-        return false;
-    }
-
-    // If all checks passed, it's a Rust v0 function
+    if (name.rfind("_ZN", 0) != 0) return false;
     return true;
 }
 
@@ -82,23 +71,10 @@ BOOL IsRustLegacy(const string& name) {
 
 BOOL IsRuntime(const string& name) {
     static const set<string> names = {
-        "_start",
-        "deregister_tm_clones",
-        "register_tm_clones",
-        "__do_global_dtors_aux",
-        "frame_dummy",
-        "main",
-        "rust_eh_personality",
-        ".init",
-        "_init",
-        ".fini",
-        "_fini",
-        ".plt",
-        ".plt.got",
-        ".plt.sec",
-        ".text",
+        "_start", "deregister_tm_clones", "register_tm_clones", "__do_global_dtors_aux",
+        "frame_dummy", "main", "rust_eh_personality", ".init", "_init", ".fini", "_fini",
+        ".plt", ".plt.got", ".plt.sec", ".text", "__rust_try"
     };
-
     return names.count(name) > 0;
 }
 
@@ -110,40 +86,9 @@ BOOL IsRust(const string& name) {
     return IsRustModern(name) || IsRustLegacy(name);
 }
 
-INT32 Usage() {
-    cerr << "Baleen 🐋" << endl;
-    cerr << KNOB_BASE::StringKnobSummary() << endl;
-    return -1;
-}
-
-VOID EnterC(THREADID tid, const string* rtnName) {
-    calls << "Entering " << *rtnName << " (C)" << endl;
-    language[tid].push(Language::C);
-    calls << "Done" << endl;
-}
-
-VOID EnterRust(THREADID tid, const string* rtnName) {
-    calls << "Entering " << *rtnName << " (RUST)" << endl;
-    language[tid].push(Language::RUST);
-    calls << "Done" << endl;
-}
-
-VOID LeaveLanguage(THREADID tid, const string* rtnName) {
-    calls << "Leaving " << *rtnName << endl;
-    language[tid].pop();
-    calls << "Done" << endl;
-}
-
 BOOL IMG_IsVdso(IMG img) {
     string imgName = IMG_Name(img);
-
-    // Check for common vDSO names
-    static const set<string> names = {
-        "[vdso]",
-        "[linux-gate.so.1]",
-        "[linux-vdso.so.1]"
-    };
-
+    static const set<string> names = {"[vdso]", "[linux-gate.so.1]", "[linux-vdso.so.1]"};
     return names.count(imgName) > 0;
 }
 
@@ -152,59 +97,212 @@ Language RTN_Language(IMG img, RTN rtn) {
         return Language::SHARED;
     }
 
-    string rtnName = RTN_Name(rtn);
-
-    if (IsStub(rtnName) || IsRuntime(rtnName)) {
+    // --- NEW CHECK ---
+    // Check if the routine is in libc
+    string imgName = IMG_Name(img);
+    if (imgName.find("libc") != string::npos) {
         return Language::SHARED;
     }
 
+    if (imgName.find("libblkid") != string::npos) {
+        return Language::SHARED;
+    }
+
+    // --- END NEW CHECK ---
+
+    string rtnName = RTN_Name(rtn);
+    if (IsStub(rtnName) || IsRuntime(rtnName)) {
+        return Language::SHARED;
+    }
     if (IMG_IsMainExecutable(img)) {
         return IsRust(rtnName) ? Language::RUST : Language::C;
     }
-
     return Language::C;
 }
 
-VOID Image(IMG img, VOID *v) {
-    messages << "Loading image... " << IMG_Name(img) << endl;
 
-    for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec)) {
-        for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
-            string rtnName = RTN_Name(rtn);
+INT32 Usage() {
+    cerr << "Baleen 🐋 (State-Based Model)" << endl;
+    cerr << KNOB_BASE::StringKnobSummary() << endl;
+    return -1;
+}
 
-            // Determine the routine language
-            Language language = RTN_Language(img, rtn);
 
-            messages << "Inspecting " << rtnName << " (" << LanguageToString(language) << ")" << endl;
+VOID CheckLanguageState(THREADID tid, ADDRINT new_lang_int, const string* rtnName) {
+    // Cast the new language from an integer back to our enum
+    Language new_lang = (Language)new_lang_int;
 
-            RTN_Open(rtn);
+    // --- REPLACED ---
+    // We must acquire the lock before touching the global map
+    // The second argument just needs to be non-zero
+    PIN_GetLock(&global_lock, tid + 1);
 
-            if (language != Language::SHARED) {
-                auto EnterLanguage = language == Language::RUST ? EnterRust : EnterC;
+    // Get the *current* language from the map.
+    // If tid isn't in the map, map[tid] creates it and
+    // default-initializes it to 0, which is Language::SHARED.
+    Language current_lang = thread_states[tid];
 
-                // Insert the routine name into our set to get a stable pointer
-                auto it = rtn_names.insert(rtnName);
-                const string* rtnNamePtr = &(*it.first);
-
-                // Insert call at entry
-                RTN_InsertCall(rtn, IPOINT_BEFORE, (AFUNPTR) EnterLanguage,
-                               IARG_THREAD_ID,
-                               IARG_PTR, rtnNamePtr,
-                               IARG_END);
-                
-                // Insert call at exit
-                RTN_InsertCall(rtn, IPOINT_AFTER, (AFUNPTR) LeaveLanguage,
-                               IARG_THREAD_ID,
-                               IARG_PTR, rtnNamePtr,
-                               IARG_END);
-            }
-
-            RTN_Close(rtn);
-        }
+    // If the language hasn't changed, do nothing.
+    if (new_lang == current_lang) {
+        // We must release the lock before returning!
+        PIN_ReleaseLock(&global_lock);
+        return;
     }
 
-    messages << endl;
+    // A transition has occurred!
+    calls << LanguageToString(current_lang) << " -> " << LanguageToString(new_lang)
+          << " (at " << *rtnName << ")" << endl;
+
+    // **CRITICAL:** Update the thread's "current language" state in the map.
+    thread_states[tid] = new_lang;
+    
+    // **CRITICAL:** Release the lock
+    PIN_ReleaseLock(&global_lock);
 }
+
+// --- NEW ---
+// Helper function to add bytes to the correct counter
+VOID AddAllocation(THREADID tid, ADDRINT size) {
+    // Acquire lock to safely access globals
+    PIN_GetLock(&global_lock, tid + 1);
+
+    // Get the language of the *caller*
+    Language lang = thread_states[tid];
+
+    switch (lang) {
+    case Language::RUST:
+        bytes_allocated_rust += size;
+        break;
+    case Language::C:
+        bytes_allocated_c += size;
+        break;
+    case Language::SHARED:
+        bytes_allocated_shared += size;
+        break;
+    }
+
+    // Release the lock
+    PIN_ReleaseLock(&global_lock);
+}
+
+// --- NEW ---
+// Analysis functions to be called *before* allocation functions
+VOID RecordMalloc(THREADID tid, ADDRINT size) {
+    AddAllocation(tid, size);
+}
+
+VOID RecordCalloc(THREADID tid, ADDRINT num, ADDRINT size) {
+    AddAllocation(tid, num * size);
+}
+
+VOID RecordRealloc(THREADID tid, ADDRINT size) {
+    // We only care about the new size being requested.
+    // This isn't perfect (realloc can shrink, or re-use),
+    // but it's the standard way to track this.
+    AddAllocation(tid, size);
+}
+
+VOID InstrumentTrace(TRACE trace, VOID *v) {
+    // Get the address of the first instruction in the trace
+    ADDRINT trace_addr = TRACE_Address(trace);
+
+    // We must lock Pin to safely look up routine information
+    PIN_LockClient();
+    
+    RTN rtn = RTN_FindByAddress(trace_addr);
+
+    Language trace_lang = Language::SHARED;
+    string rtnName = "unknown";
+
+    if (RTN_Valid(rtn)) {
+        SEC sec = RTN_Sec(rtn);
+        if (SEC_Valid(sec)) {
+            IMG img = SEC_Img(sec);
+            if (IMG_Valid(img)) {
+                // Use our existing helper to find the language of this routine
+                trace_lang = RTN_Language(img, rtn);
+                rtnName = RTN_Name(rtn);
+            }
+        }
+    }
+    
+    // Unlock Pin as we are done looking up symbols
+    PIN_UnlockClient();
+
+    if (trace_lang != Language::SHARED) {
+        // Get a stable pointer to the routine name string
+        auto it = rtn_names.insert(rtnName);
+        const string* rtnNamePtr = &(*it.first);
+
+        // Insert a call to our analysis function (CheckLanguageState)
+        TRACE_InsertCall(trace, IPOINT_BEFORE, (AFUNPTR)CheckLanguageState,
+                         IARG_THREAD_ID,
+                         IARG_ADDRINT, (ADDRINT)trace_lang,
+                         IARG_PTR, rtnNamePtr,
+                         IARG_END);
+    }
+}
+
+// --- NEW ---
+// This function is called for every image load
+VOID InstrumentImage(IMG img, VOID *v) {
+    messages << "Instrumenting image: " << IMG_Name(img) << endl;
+
+    // Find the allocation routines
+    RTN malloc_rtn = RTN_FindByName(img, "malloc");
+    if (RTN_Valid(malloc_rtn)) {
+        messages << "  Found malloc" << endl;
+        RTN_Open(malloc_rtn);
+        RTN_InsertCall(malloc_rtn, IPOINT_BEFORE, (AFUNPTR)RecordMalloc,
+                       IARG_THREAD_ID,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                       IARG_END);
+        RTN_Close(malloc_rtn);
+    }
+
+    RTN calloc_rtn = RTN_FindByName(img, "calloc");
+    if (RTN_Valid(calloc_rtn)) {
+        messages << "  Found calloc" << endl;
+        RTN_Open(calloc_rtn);
+        RTN_InsertCall(calloc_rtn, IPOINT_BEFORE, (AFUNPTR)RecordCalloc,
+                       IARG_THREAD_ID,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                       IARG_END);
+        RTN_Close(calloc_rtn);
+    }
+
+    RTN realloc_rtn = RTN_FindByName(img, "realloc");
+    if (RTN_Valid(realloc_rtn)) {
+        messages << "  Found realloc" << endl;
+        RTN_Open(realloc_rtn);
+        // realloc(void *ptr, size_t size) -> we want arg 1
+        RTN_InsertCall(realloc_rtn, IPOINT_BEFORE, (AFUNPTR)RecordRealloc,
+                       IARG_THREAD_ID,
+                       IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
+                       IARG_END);
+        RTN_Close(realloc_rtn);
+    }
+}
+
+// --- NEW ---
+// This function is called when the application exits
+VOID PrintReport(INT32 code, VOID *v) {
+    // We re-open the messages file in append mode to add our report
+    ofstream report("baleen-messages.log", std::ios::app);
+    if (!report) {
+        cerr << "Could not open report file." << endl;
+        return;
+    }
+
+    report << endl << "--- Allocation Report ---" << endl;
+    report << "Rust:   " << bytes_allocated_rust << " bytes" << endl;
+    report << "C:      " << bytes_allocated_c << " bytes" << endl;
+    report << "Shared: " << bytes_allocated_shared << " bytes" << endl;
+    report << "Total:  " << (bytes_allocated_rust + bytes_allocated_c + bytes_allocated_shared) << " bytes" << endl;
+    report.close();
+}
+
 
 int main(int argc, char *argv[]) {
     // Initialize symbol processing
@@ -219,8 +317,19 @@ int main(int argc, char *argv[]) {
     messages.open("baleen-messages.log");
     calls.open("baleen-calls.log");
 
-    // Register image instrumentation callback
-    IMG_AddInstrumentFunction(Image, 0);
+    // Initialize our global lock
+    PIN_InitLock(&global_lock);
+
+    // Register TRACE instrumentation callback
+    TRACE_AddInstrumentFunction(InstrumentTrace, 0);
+
+    // --- NEW ---
+    // Register IMAGE instrumentation callback
+    IMG_AddInstrumentFunction(InstrumentImage, 0);
+
+    // Register Fini callback
+    PIN_AddFiniFunction(PrintReport, 0);
+    // --- END NEW ---
 
     // Start the program
     PIN_StartProgram();
