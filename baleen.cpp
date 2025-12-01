@@ -2,9 +2,11 @@
 #include <iostream>
 #include <fstream>
 #include <set>
-#include <map> // --- NEW --- Include map
+#include <map>
 
 #include "language.h"
+#include "allocation.h"
+
 #include "registry.h"
 
 using std::map;
@@ -14,59 +16,6 @@ using std::string;
 using std::cerr;
 using std::endl;
 using std::ofstream;
-
-class AllocationTracker {
-private:
-	PIN_LOCK lock;
-	map<Language, UINT64> allocations;
-	map<THREADID, map<string, pair<UINT64, USIZE>>> pending;
-	map<THREADID, map<string, UINT64>> counter;
-	ofstream log;
-	
-	VOID Allocate(THREADID tid, UINT64 bytes, Language lang) {
-		allocations[lang] += bytes;
-	}
-
-public:
-	AllocationTracker() {}
-
-	VOID BeforeMalloc(THREADID tid, UINT64 bytes, Language lang) {
-		PIN_GetLock(&lock, tid + 1);
-
-		auto id = counter[tid]["malloc"]++;
-		pending[tid]["malloc"] = { id, bytes };
-
-		PIN_ReleaseLock(&lock);
-	}
-
-	VOID AfterMalloc(THREADID tid, ADDRINT returned, Language lang) {
-		PIN_GetLock(&lock, tid + 1);
-
-		auto payload = pending[tid]["malloc"];
-
-		if (returned != 0) {
-			USIZE size = payload.second;
-			Allocate(tid, size, lang);
-		} else {
-			log << "[AFTER MALLOC] [" << payload.first << "] 'malloc' failed" << endl;
-		}
-
-		PIN_ReleaseLock(&lock);
-	}
-
-	VOID Report(ofstream& stream) {
-		auto rustBytes = allocations[Language::RUST];
-		auto cBytes = allocations[Language::C];
-		auto sharedBytes = allocations[Language::SHARED];
-
-		stream << endl << "--- Allocation Report ---" << endl;
-		stream << "Rust:   " << rustBytes << " bytes" << endl;
-		stream << "C:      " << cBytes << " bytes" << endl;
-		stream << "Shared: " << sharedBytes << " bytes" << endl;
-		stream << "Total:  " << (rustBytes + cBytes + sharedBytes) << " bytes" << endl;
-		stream.close();
-	}
-};
 
 ofstream messages;
 ofstream calls;
@@ -155,18 +104,15 @@ Language RTN_Language(IMG img, RTN rtn) {
     return Language::C;
 }
 
-
 INT32 Usage() {
     cerr << "Baleen 🐋 (State-Based Model)" << endl;
     cerr << KNOB_BASE::StringKnobSummary() << endl;
     return -1;
 }
 
-
-VOID CheckLanguageState(THREADID tid, ADDRINT new_lang_int, const string* rtnName) {
-    Language new_lang = (Language)new_lang_int;
-
-	languageTracker.CheckState(tid, new_lang, rtnName);
+VOID CheckLanguageState(THREADID tid, ADDRINT newLang, const string* rtnName) {
+	Language lang = (Language) newLang;
+	languageTracker.CheckState(tid, lang, rtnName);
 }
 
 // Maps every starting address to its object (name and size).
@@ -221,16 +167,14 @@ VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
 std::map<THREADID, std::pair<unsigned long long, USIZE>> pendingMalloc;
 PIN_LOCK mallocLock;
 
-unsigned long long total_malloc_calls = 0;
-
 VOID BeforeMalloc(THREADID tid, USIZE size) {
-    Language l = languageTracker.GetCurrent(tid);
-	allocationTracker.BeforeMalloc(tid, size, l);
+    Language lang = languageTracker.GetCurrent(tid);
+	allocationTracker.BeforeMalloc(tid, size, lang);
 }
 
-VOID AfterMalloc(THREADID tid, ADDRINT ret) {
-	Language l = languageTracker.GetCurrent(tid);
-	allocationTracker.AfterMalloc(tid, ret, l);
+VOID AfterMalloc(THREADID tid, ADDRINT returned) {
+	Language lang = languageTracker.GetCurrent(tid);
+	allocationTracker.AfterMalloc(tid, returned, lang);
 }
 
 VOID InstrumentTrace(TRACE trace, VOID *v) {
