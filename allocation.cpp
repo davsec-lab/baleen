@@ -12,7 +12,7 @@ VOID AllocationTracker::BeforeMalloc(THREADID tid, UINT64 bytes, Language lang) 
 	PIN_GetLock(&lock, tid + 1);
 
 	auto id = counter[tid]["malloc"]++;
-	pending[tid]["malloc"] = { id, bytes };
+	pendingMalloc[tid] = { id, bytes };
 
 	PIN_ReleaseLock(&lock);
 }
@@ -20,7 +20,7 @@ VOID AllocationTracker::BeforeMalloc(THREADID tid, UINT64 bytes, Language lang) 
 VOID AllocationTracker::AfterMalloc(THREADID tid, ADDRINT returned, Language lang) {
 	PIN_GetLock(&lock, tid + 1);
 
-	auto payload = pending[tid]["malloc"];
+	auto payload = pendingMalloc[tid];
 
 	if (returned != 0) {
 		USIZE size = payload.second;
@@ -33,11 +33,29 @@ VOID AllocationTracker::AfterMalloc(THREADID tid, ADDRINT returned, Language lan
 }
 
 VOID AllocationTracker::BeforeRealloc(THREADID tid, ADDRINT addr, USIZE size, Language lang) {
+	PIN_GetLock(&lock, tid + 1);
+
 	log << "[BEFORE REALLOC]" << endl;
+
+	auto id = counter[tid]["realloc"]++;
+	pendingRealloc[tid] = { id, addr, size };
+
+	PIN_ReleaseLock(&lock);
 }
 
 VOID AllocationTracker::AfterRealloc(THREADID tid, ADDRINT newAddr, ObjectTracker& objectTracker) {
+	PIN_GetLock(&lock, tid + 1);
+
 	log << "[AFTER REALLOC]" << endl;
+
+	auto payload = pendingRealloc[tid];
+
+	ADDRINT oldAddr = get<1>(payload);
+	USIZE size = get<2>(payload);
+	
+	objectTracker.MoveObject(tid, oldAddr, newAddr, size);
+
+	PIN_ReleaseLock(&lock);
 }
 
 VOID AllocationTracker::Report(ofstream& stream) {

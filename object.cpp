@@ -1,3 +1,5 @@
 #include "object.h"
 
-ObjectTracker::ObjectTracker() {}
+ObjectTracker::ObjectTracker() {
+    log.open(".baleen/object.log");
+}

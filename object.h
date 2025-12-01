@@ -70,6 +70,30 @@ public:
 		PIN_ReleaseLock(&lock);
 	}
 
+	VOID MoveObject(THREADID tid, ADDRINT oldAddr, ADDRINT newAddr, USIZE size) {
+		if (oldAddr == newAddr) return;
+
+		Node *node = objects.remove(oldAddr);
+
+		if (node) {
+			log << "[MOVE OBJECT] Object '" << node->name
+				<< "' was moved!" << endl;
+			
+			log << "[MOVE OBJECT] - [0x" << hex << node->start
+				<< ", 0x" << node->start + node->size
+				<< ") → [0x" << newAddr
+				<< ", 0x" << newAddr + size
+				<< ")" << dec << endl;
+			
+			log << "[MOVE OBJECT] - " << node->size
+				<< " → " << size
+				<< " bytes" << endl;
+			
+			objects.insert(newAddr, size, node->name);
+			starts[node->name] = newAddr;
+		}
+	}
+
 	VOID RecordWrite(THREADID tid, ADDRINT addr, Language lang) {
 		PIN_GetLock(&lock, tid + 1);
 

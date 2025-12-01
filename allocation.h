@@ -9,6 +9,8 @@
 using std::ofstream;
 using std::map;
 using std::pair;
+using std::get;
+using std::tuple;
 
 class AllocationTracker {
 private:
@@ -16,7 +18,10 @@ private:
 	ofstream log;
 
 	map<Language, UINT64> allocations;
-	map<THREADID, map<string, pair<UINT64, USIZE>>> pending;
+
+	map<THREADID, pair<UINT64, USIZE>> pendingMalloc;
+	map<THREADID, tuple<UINT64, ADDRINT, USIZE>> pendingRealloc;
+
 	map<THREADID, map<string, UINT64>> counter;
 	
 	VOID Allocate(THREADID tid, UINT64 bytes, Language lang);
