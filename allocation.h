@@ -2,7 +2,9 @@
 #define ALLOCATION_H
 
 #include "pin.H"
+
 #include "language.h"
+#include "object.h"
 
 using std::ofstream;
 using std::map;
@@ -21,8 +23,13 @@ private:
 
 public:
 	AllocationTracker();
+
 	VOID BeforeMalloc(THREADID tid, UINT64 bytes, Language lang);
 	VOID AfterMalloc(THREADID tid, ADDRINT returned, Language lang);
+
+	VOID BeforeRealloc(THREADID tid, ADDRINT oldAddr, USIZE size, Language lang);
+	VOID AfterRealloc(THREADID tid, ADDRINT newAddr, ObjectTracker& objectTracker);
+
 	VOID Report(ofstream& stream);
 };
 

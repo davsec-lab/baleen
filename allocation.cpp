@@ -32,6 +32,14 @@ VOID AllocationTracker::AfterMalloc(THREADID tid, ADDRINT returned, Language lan
 	PIN_ReleaseLock(&lock);
 }
 
+VOID AllocationTracker::BeforeRealloc(THREADID tid, ADDRINT oldAddr, USIZE size, Language lang) {
+	log << "[BEFORE REALLOC]" << endl;
+}
+
+VOID AllocationTracker::AfterRealloc(THREADID tid, ADDRINT newAddr, ObjectTracker& objectTracker) {
+	log << "[AFTER REALLOC]" << endl;
+}
+
 VOID AllocationTracker::Report(ofstream& stream) {
 	auto rustBytes = allocations[Language::RUST];
 	auto cBytes = allocations[Language::C];
@@ -42,5 +50,4 @@ VOID AllocationTracker::Report(ofstream& stream) {
 	stream << "C:      " << cBytes << " bytes" << endl;
 	stream << "Shared: " << sharedBytes << " bytes" << endl;
 	stream << "Total:  " << (rustBytes + cBytes + sharedBytes) << " bytes" << endl;
-	stream.close();
 }

@@ -5,6 +5,7 @@
 #include "allocation.h"
 #include "utilities.h"
 #include "registry.h"
+#include "object.h"
 
 using std::cerr;
 
@@ -12,11 +13,13 @@ ofstream messages;
 ofstream calls;
 ofstream routines;
 ofstream allocations;
+ofstream accesses;
 
 static set<string> rtn_names; 
 
 AllocationTracker allocationTracker;
 LanguageTracker languageTracker;
+ObjectTracker objectTracker;
 
 INT32 Usage() {
     cerr << "Baleen 🐋 (State-Based Model)" << endl;
@@ -40,6 +43,61 @@ map<string, map<Language, int>> reads;
 
 // Maps the name of every object to its write count.
 map<string, map<Language, int>> writes;
+
+VOID RecordMemRead(THREADID tid, ADDRINT ip, ADDRINT addr) {
+    auto node = objects.find(addr);
+
+    if (node) {
+        Language currentLang = languageTracker.GetCurrent(tid);
+        
+        accesses << "[READ] Read from " << std::hex << addr 
+                << " ('" << node->object
+                << "')\n" << std::dec << endl;
+
+        // Increment count for this object
+        reads[node->object][currentLang]++;
+    }
+}
+
+VOID RecordMemWrite(THREADID tid, ADDRINT ip, ADDRINT addr) {
+    auto node = objects.find(addr);
+
+    if (node) {
+        Language currentLang = languageTracker.GetCurrent(tid);
+        
+        accesses << "[WRITE] Write to " << std::hex << addr 
+                << " ('" << node->object
+                << "')\n" << std::dec << endl;
+
+        // Increment count for this object
+        writes[node->object][currentLang]++;
+    }
+}
+
+VOID Instruction(INS ins, VOID *v) {
+    // Instrument memory reads
+    UINT32 memOperands = INS_MemoryOperandCount(ins);
+    
+    for (UINT32 memOp = 0; memOp < memOperands; memOp++) {
+        if (INS_MemoryOperandIsRead(ins, memOp)) {
+            INS_InsertPredicatedCall(
+                ins, IPOINT_BEFORE, (AFUNPTR)RecordMemRead,
+                IARG_THREAD_ID,  // Add this
+                IARG_INST_PTR,
+                IARG_MEMORYOP_EA, memOp,
+                IARG_END);
+        }
+
+        if (INS_MemoryOperandIsWritten(ins, memOp)) {
+            INS_InsertPredicatedCall(
+                ins, IPOINT_BEFORE, (AFUNPTR)RecordMemWrite,
+                IARG_THREAD_ID,  // Add this
+                IARG_INST_PTR,
+                IARG_MEMORYOP_EA, memOp,
+                IARG_END);
+        }
+    }
+}
 
 VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
     // Read the string name
@@ -86,6 +144,15 @@ VOID BeforeMalloc(THREADID tid, USIZE size) {
 VOID AfterMalloc(THREADID tid, ADDRINT returned) {
 	Language lang = languageTracker.GetCurrent(tid);
 	allocationTracker.AfterMalloc(tid, returned, lang);
+}
+
+VOID BeforeRealloc(THREADID tid, ADDRINT addr, USIZE size) {
+    Language lang = languageTracker.GetCurrent(tid);
+	allocationTracker.BeforeRealloc(tid, addr, size, lang);
+}
+
+VOID AfterRealloc(THREADID tid, ADDRINT addr) {
+	allocationTracker.AfterRealloc(tid, addr, objectTracker);
 }
 
 VOID InstrumentTrace(TRACE trace, VOID *v) {
@@ -147,18 +214,31 @@ VOID InstrumentImage(IMG img, VOID *v) {
 
 	routines << endl;
 
-	RTN_InstrumentByName(img, "baleen", IPOINT_BEFORE, (AFUNPTR) BeforeBaleen,
-						 IARG_THREAD_ID,
+	RTN_InstrumentByName(img, "baleen", IPOINT_BEFORE,
+						 (AFUNPTR) BeforeBaleen,
 						 IARG_FUNCARG_ENTRYPOINT_VALUE, 0,  // Address
 						 IARG_FUNCARG_ENTRYPOINT_VALUE, 1,  // Size
 						 IARG_FUNCARG_ENTRYPOINT_VALUE, 2); // Name
 
 	if (IMG_Name(img).find("libc") != string::npos) {
-		RTN_InstrumentByName(img, "malloc", IPOINT_BEFORE, (AFUNPTR) BeforeMalloc,
+		RTN_InstrumentByName(img, "malloc", IPOINT_BEFORE,
+							 (AFUNPTR) BeforeMalloc,
 							 IARG_THREAD_ID,
 							 IARG_FUNCARG_ENTRYPOINT_VALUE, 0);
 		
-		RTN_InstrumentByName(img, "malloc", IPOINT_AFTER, (AFUNPTR) AfterMalloc,
+		RTN_InstrumentByName(img, "malloc", IPOINT_AFTER,
+							 (AFUNPTR) AfterMalloc,
+							 IARG_THREAD_ID,
+							 IARG_FUNCRET_EXITPOINT_VALUE);
+
+		RTN_InstrumentByName(img, "realloc", IPOINT_BEFORE,
+							 (AFUNPTR) BeforeRealloc,
+							 IARG_THREAD_ID,
+							 IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+							 IARG_FUNCARG_ENTRYPOINT_VALUE, 1);
+		
+		RTN_InstrumentByName(img, "realloc", IPOINT_AFTER,
+							 (AFUNPTR) AfterRealloc,
 							 IARG_THREAD_ID,
 							 IARG_FUNCRET_EXITPOINT_VALUE);
 	}
@@ -172,6 +252,27 @@ VOID PrintReport(INT32 code, VOID *v) {
     }
 
     allocationTracker.Report(report);
+
+    report << "Name, Reads (Rust), Reads (C), Writes (Rust), Writes (C)" << std::endl;
+
+    for (const auto& pair : reads) {
+        const string& objName = pair.first;
+
+        report << objName << ", ";
+
+        int rustReads = reads[objName][Language::RUST];
+        int cReads = reads[objName][Language::C];
+
+        report << rustReads << ", " << cReads << ", ";
+
+        int rustWrites = writes[objName][Language::RUST];
+        int cWrites = writes[objName][Language::C];
+
+        report << rustWrites << ", " << cWrites << std::endl;
+    }
+
+    report.close();
+
 }
 
 int main(int argc, char *argv[]) {
@@ -188,6 +289,7 @@ int main(int argc, char *argv[]) {
 	routines.open(".baleen/routines.log");
     messages.open("baleen-messages.log");
     calls.open("baleen-calls.log");
+	accesses.open("baleen-accesses.log");
 
     // Register TRACE instrumentation callback
     TRACE_AddInstrumentFunction(InstrumentTrace, 0);
@@ -195,6 +297,8 @@ int main(int argc, char *argv[]) {
     // --- NEW ---
     // Register IMAGE instrumentation callback
     IMG_AddInstrumentFunction(InstrumentImage, 0);
+
+	INS_AddInstrumentFunction(Instruction, 0);
 
     // Register Fini callback
     PIN_AddFiniFunction(PrintReport, 0);
@@ -208,6 +312,7 @@ int main(int argc, char *argv[]) {
 	routines.close();
     messages.close();
     calls.close();
+	accesses.close();
 
     return 0;
 }
