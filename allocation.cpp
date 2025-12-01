@@ -32,7 +32,7 @@ VOID AllocationTracker::AfterMalloc(THREADID tid, ADDRINT returned, Language lan
 	PIN_ReleaseLock(&lock);
 }
 
-VOID AllocationTracker::BeforeRealloc(THREADID tid, ADDRINT oldAddr, USIZE size, Language lang) {
+VOID AllocationTracker::BeforeRealloc(THREADID tid, ADDRINT addr, USIZE size, Language lang) {
 	log << "[BEFORE REALLOC]" << endl;
 }
 

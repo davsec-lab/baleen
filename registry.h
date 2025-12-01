@@ -16,8 +16,8 @@ typedef struct Node {
     // Objects with starting addresses greater than the key.
     struct Node *right;
 
-    // The object this node represents.
-    string object;
+    // The name of the object this node represents.
+    string name;
 
     // The address of this object.
     ADDRINT start;

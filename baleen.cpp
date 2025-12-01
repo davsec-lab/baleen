@@ -32,46 +32,14 @@ VOID CheckLanguageState(THREADID tid, ADDRINT newLang, const string* rtnName) {
 	languageTracker.CheckState(tid, lang, rtnName);
 }
 
-// Maps every starting address to its object (name and size).
-Registry objects;
-
-// Maps the name of every object to its starting address.
-map<string, ADDRINT> starts;
-
-// Maps the name of every object to its read count.
-map<string, map<Language, int>> reads;
-
-// Maps the name of every object to its write count.
-map<string, map<Language, int>> writes;
-
 VOID RecordMemRead(THREADID tid, ADDRINT ip, ADDRINT addr) {
-    auto node = objects.find(addr);
-
-    if (node) {
-        Language currentLang = languageTracker.GetCurrent(tid);
-        
-        accesses << "[READ] Read from " << std::hex << addr 
-                << " ('" << node->object
-                << "')\n" << std::dec << endl;
-
-        // Increment count for this object
-        reads[node->object][currentLang]++;
-    }
+    Language lang = languageTracker.GetCurrent(tid);
+	objectTracker.RecordWrite(tid, addr, lang);
 }
 
 VOID RecordMemWrite(THREADID tid, ADDRINT ip, ADDRINT addr) {
-    auto node = objects.find(addr);
-
-    if (node) {
-        Language currentLang = languageTracker.GetCurrent(tid);
-        
-        accesses << "[WRITE] Write to " << std::hex << addr 
-                << " ('" << node->object
-                << "')\n" << std::dec << endl;
-
-        // Increment count for this object
-        writes[node->object][currentLang]++;
-    }
+    Language lang = languageTracker.GetCurrent(tid);
+	objectTracker.RecordRead(tid, addr, lang);
 }
 
 VOID Instruction(INS ins, VOID *v) {
@@ -99,41 +67,8 @@ VOID Instruction(INS ins, VOID *v) {
     }
 }
 
-VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
-    // Read the string name
-    std::string objectName;
-    if (name != 0) {
-        char buffer[256];
-        PIN_SafeCopy(buffer, (void*)name, sizeof(buffer) - 1);
-        buffer[255] = '\0';
-        objectName = buffer;
-    } else {
-        objectName = "unnamed";
-    }
-
-    // Map the address range to the object name
-    objects.insert(addr, size, objectName);
-    starts[objectName] = addr;
-    
-    // Initialize the counts for this object name (if not already present)
-    if (reads.find(objectName) == reads.end()) {
-        reads[objectName] = {};
-        writes[objectName] = {};
-
-        reads[objectName][Language::C] = 0;
-        reads[objectName][Language::RUST] = 0;
-
-        writes[objectName][Language::C] = 0;
-        writes[objectName][Language::RUST] = 0;
-    }
-
-    messages << "[BEFORE BALEEN] Object '" << objectName
-            << "' occupies " << size
-            << " bytes in range [0x" << std::hex << addr
-            << ", 0x" << addr + size
-            << ")\n" << std::dec << std::endl;
-
-    messages.flush();
+VOID BeforeBaleen(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT name) {
+    objectTracker.RegisterObject(tid, addr, size, name);
 }
 
 VOID BeforeMalloc(THREADID tid, USIZE size) {
@@ -216,6 +151,7 @@ VOID InstrumentImage(IMG img, VOID *v) {
 
 	RTN_InstrumentByName(img, "baleen", IPOINT_BEFORE,
 						 (AFUNPTR) BeforeBaleen,
+						 IARG_THREAD_ID,
 						 IARG_FUNCARG_ENTRYPOINT_VALUE, 0,  // Address
 						 IARG_FUNCARG_ENTRYPOINT_VALUE, 1,  // Size
 						 IARG_FUNCARG_ENTRYPOINT_VALUE, 2); // Name
@@ -252,27 +188,9 @@ VOID PrintReport(INT32 code, VOID *v) {
     }
 
     allocationTracker.Report(report);
-
-    report << "Name, Reads (Rust), Reads (C), Writes (Rust), Writes (C)" << std::endl;
-
-    for (const auto& pair : reads) {
-        const string& objName = pair.first;
-
-        report << objName << ", ";
-
-        int rustReads = reads[objName][Language::RUST];
-        int cReads = reads[objName][Language::C];
-
-        report << rustReads << ", " << cReads << ", ";
-
-        int rustWrites = writes[objName][Language::RUST];
-        int cWrites = writes[objName][Language::C];
-
-        report << rustWrites << ", " << cWrites << std::endl;
-    }
-
+	objectTracker.Report(report);
+    
     report.close();
-
 }
 
 int main(int argc, char *argv[]) {

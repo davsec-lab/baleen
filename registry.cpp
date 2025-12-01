@@ -9,7 +9,7 @@ void Registry::insert(ADDRINT start, USIZE size, string object) {
     Node *newNode = new Node;
     newNode->left = nullptr;
     newNode->right = nullptr;
-    newNode->object = object;
+    newNode->name = object;
     newNode->start = start;
     newNode->size = size;
     
@@ -33,7 +33,7 @@ void Registry::insert(ADDRINT start, USIZE size, string object) {
         } else {
             // Key already exists - could handle this differently
             // For now, we'll just replace the existing node's data
-            current->object = object;
+            current->name = object;
             current->size = size;
             delete newNode;
             return;
@@ -143,7 +143,7 @@ Node *Registry::remove(ADDRINT key) {
         }
         
         // Copy successor's data to current node
-        current->object = successor->object;
+        current->name = successor->name;
         current->start = successor->start;
         current->size = successor->size;
         
