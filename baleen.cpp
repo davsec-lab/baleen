@@ -1,21 +1,12 @@
 #include "pin.H"
-#include <iostream>
-#include <fstream>
-#include <set>
-#include <map>
 
+#include "extensions.h"
 #include "language.h"
 #include "allocation.h"
-
+#include "utilities.h"
 #include "registry.h"
 
-using std::map;
-using std::pair;
-using std::set;
-using std::string;
 using std::cerr;
-using std::endl;
-using std::ofstream;
 
 ofstream messages;
 ofstream calls;
@@ -26,83 +17,6 @@ static set<string> rtn_names;
 
 AllocationTracker allocationTracker;
 LanguageTracker languageTracker;
-
-// All helper functions (EndsWith, IsRustModern, IsRustLegacy, IsRuntime, IsStub, IsRust)
-// remain exactly the same as in your original code.
-BOOL EndsWith(std::string_view s, std::string_view suffix) {
-    if (s.length() < suffix.length()) return false;
-    size_t start_pos = s.length() - suffix.length();
-    return s.substr(start_pos) == suffix;
-}
-
-BOOL IsRustModern(const string& name) {
-    size_t len = name.length();
-    if (len < 19) return false;
-    if (name[len - 1] != 'E') return false;
-    if (name[len - 20] != '1' || name[len - 19] != '7' || name[len - 18] != 'h') return false;
-    for (size_t i = len - 17; i < len - 1; ++i) {
-        if (!std::isxdigit(static_cast<unsigned char>(name[i]))) return false;
-    }
-    if (name.rfind("_ZN", 0) != 0) return false;
-    return true;
-}
-
-BOOL IsRustLegacy(const string& name) {
-    return name.find("___rust") != string::npos;
-}
-
-BOOL IsRuntime(const string& name) {
-    static const set<string> names = {
-        "_start", "deregister_tm_clones", "register_tm_clones", "__do_global_dtors_aux",
-        "frame_dummy", "rust_eh_personality", ".init", "_init", ".fini", "_fini",
-        ".plt", ".plt.got", ".plt.sec", ".text", "__rust_try", ""
-    };
-    return names.count(name) > 0;
-}
-
-BOOL IsStub(const string& name) {
-    return EndsWith(name, "@plt");
-}
-
-BOOL IsRust(const string& name) {
-    return IsRustModern(name) || IsRustLegacy(name) || name == "main";
-}
-
-BOOL IMG_IsVdso(IMG img) {
-    string imgName = IMG_Name(img);
-    static const set<string> names = {"[vdso]", "[linux-gate.so.1]", "[linux-vdso.so.1]"};
-    return names.count(imgName) > 0;
-}
-
-Language RTN_Language(IMG img, RTN rtn) {
-    if (IMG_IsInterpreter(img) || IMG_IsVdso(img)) {
-        return Language::SHARED;
-    }
-
-    string imgName = IMG_Name(img);
-    if (imgName.find("libc") != string::npos) {
-        return Language::SHARED;
-    }
-
-	if (imgName.find("libgcc") != string::npos) {
-        return Language::SHARED;
-    }
-
-    if (imgName.find("libblkid") != string::npos) {
-        return Language::SHARED;
-    }
-
-    // --- END NEW CHECK ---
-
-    string rtnName = RTN_Name(rtn);
-    if (IsStub(rtnName) || IsRuntime(rtnName)) {
-        return Language::SHARED;
-    }
-    if (IMG_IsMainExecutable(img)) {
-        return IsRust(rtnName) ? Language::RUST : Language::C;
-    }
-    return Language::C;
-}
 
 INT32 Usage() {
     cerr << "Baleen 🐋 (State-Based Model)" << endl;
@@ -163,9 +77,6 @@ VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
 
     messages.flush();
 }
-
-std::map<THREADID, std::pair<unsigned long long, USIZE>> pendingMalloc;
-PIN_LOCK mallocLock;
 
 VOID BeforeMalloc(THREADID tid, USIZE size) {
     Language lang = languageTracker.GetCurrent(tid);
@@ -236,46 +147,24 @@ VOID InstrumentImage(IMG img, VOID *v) {
 
 	routines << endl;
 
-	RTN baleen_rtn = RTN_FindByName(img, "baleen");
-	if (RTN_Valid(baleen_rtn)) {
-		messages << "  Found baleen" << endl;
-		RTN_Open(baleen_rtn);
-
-		RTN_InsertCall(baleen_rtn, IPOINT_BEFORE, (AFUNPTR)BeforeBaleen,
-					IARG_THREAD_ID,
-					IARG_FUNCARG_ENTRYPOINT_VALUE, 0,  // Address
-					IARG_FUNCARG_ENTRYPOINT_VALUE, 1,  // Size
-					IARG_FUNCARG_ENTRYPOINT_VALUE, 2,  // Name
-					IARG_END);
-
-		RTN_Close(baleen_rtn);
-	}
+	RTN_InstrumentByName(img, "baleen", IPOINT_BEFORE, (AFUNPTR) BeforeBaleen,
+						 IARG_THREAD_ID,
+						 IARG_FUNCARG_ENTRYPOINT_VALUE, 0,  // Address
+						 IARG_FUNCARG_ENTRYPOINT_VALUE, 1,  // Size
+						 IARG_FUNCARG_ENTRYPOINT_VALUE, 2); // Name
 
 	if (IMG_Name(img).find("libc") != string::npos) {
-
-		// Find the allocation routines
-		RTN malloc_rtn = RTN_FindByName(img, "malloc");
-		if (RTN_Valid(malloc_rtn)) {
-			messages << "  Found malloc" << endl;
-			RTN_Open(malloc_rtn);
-
-			RTN_InsertCall(malloc_rtn, IPOINT_BEFORE, (AFUNPTR)BeforeMalloc,
-						IARG_THREAD_ID,
-						IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-						IARG_END);
-
-			RTN_InsertCall(malloc_rtn, IPOINT_AFTER, (AFUNPTR)AfterMalloc,
-						IARG_THREAD_ID,
-						IARG_FUNCRET_EXITPOINT_VALUE, 
-						IARG_END);
-
-			RTN_Close(malloc_rtn);
-		}
+		RTN_InstrumentByName(img, "malloc", IPOINT_BEFORE, (AFUNPTR) BeforeMalloc,
+							 IARG_THREAD_ID,
+							 IARG_FUNCARG_ENTRYPOINT_VALUE, 0);
+		
+		RTN_InstrumentByName(img, "malloc", IPOINT_AFTER, (AFUNPTR) AfterMalloc,
+							 IARG_THREAD_ID,
+							 IARG_FUNCRET_EXITPOINT_VALUE);
 	}
 }
 
 VOID PrintReport(INT32 code, VOID *v) {
-    // We re-open the messages file in append mode to add our report
     ofstream report("baleen-messages.log", std::ios::app);
     if (!report) {
         cerr << "Could not open report file." << endl;
