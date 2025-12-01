@@ -16,15 +16,47 @@ using std::ofstream;
 
 // --- REPLACED ---
 // static TLS_KEY tls_key; // No longer using TLS
-static PIN_LOCK global_lock; // Use a global lock for our map
+// static PIN_LOCK global_lock; // Use a global lock for our map
 // static map<THREADID, Language> thread_states; // Global map to store thread state
 
-// --- NEW ---
-// Global counters for memory allocation
-static UINT64 bytes_allocated_rust = 0;
-static UINT64 bytes_allocated_c = 0;
-static UINT64 bytes_allocated_shared = 0;
+class AllocationTracker {
+private:
+	PIN_LOCK lock;
+	map<Language, UINT64> allocations;
+	map<THREADID, map<string, pair<UINT64, USIZE>>> pending;
 
+public:
+	AllocationTracker() {}
+
+	VOID Allocate(THREADID tid, UINT64 bytes, Language lang) {
+		PIN_GetLock(&lock, tid + 1);
+
+		allocations[lang] += bytes;
+
+		PIN_ReleaseLock(&lock);
+	}
+
+	VOID BeginMalloc(THREADID tid, UINT64 bytes, Language lang) {
+		PIN_GetLock(&lock, tid + 1);
+
+		
+
+		PIN_ReleaseLock(&lock);
+	}
+
+	VOID Report(ofstream& stream) {
+		auto rustBytes = allocations[Language::RUST];
+		auto cBytes = allocations[Language::C];
+		auto sharedBytes = allocations[Language::SHARED];
+
+		stream << endl << "--- Allocation Report ---" << endl;
+		stream << "Rust:   " << rustBytes << " bytes" << endl;
+		stream << "C:      " << cBytes << " bytes" << endl;
+		stream << "Shared: " << sharedBytes << " bytes" << endl;
+		stream << "Total:  " << (rustBytes + cBytes + sharedBytes) << " bytes" << endl;
+		stream.close();
+	}
+};
 
 ofstream messages;
 ofstream calls;
@@ -33,6 +65,7 @@ ofstream allocations;
 
 static set<string> rtn_names; 
 
+AllocationTracker allocationTracker;
 LanguageTracker languageTracker;
 
 // All helper functions (EndsWith, IsRustModern, IsRustLegacy, IsRuntime, IsStub, IsRust)
@@ -180,26 +213,10 @@ VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
 // --- NEW ---
 // Helper function to add bytes to the correct counter
 VOID AddAllocation(THREADID tid, ADDRINT size) {
-    // Get the language of the *caller*
+    // Get the language
     Language lang = languageTracker.GetCurrent(tid);
 
-	// Acquire lock to safely access globals
-    PIN_GetLock(&global_lock, tid + 1);
-
-    switch (lang) {
-    case Language::RUST:
-        bytes_allocated_rust += size;
-        break;
-    case Language::C:
-        bytes_allocated_c += size;
-        break;
-    case Language::SHARED:
-        bytes_allocated_shared += size;
-        break;
-    }
-
-    // Release the lock
-    PIN_ReleaseLock(&global_lock);
+	allocationTracker.Allocate(tid, size, lang);
 }
 
 std::map<THREADID, std::pair<unsigned long long, USIZE>> pendingMalloc;
@@ -208,14 +225,8 @@ PIN_LOCK mallocLock;
 unsigned long long total_malloc_calls = 0;
 
 VOID BeforeMalloc(THREADID tid, USIZE size) {
-	// AddAllocation(tid, size);
-
-    
     Language l = languageTracker.GetCurrent(tid);
-    
-    
 
-    
     // Queue the allocation instead of applying it immediately
     PIN_GetLock(&mallocLock, tid + 1);
 	    allocations << "[BEFORE MALLOC] [" << total_malloc_calls << "] " << size
@@ -232,8 +243,6 @@ VOID AfterMalloc(THREADID tid, ADDRINT ret) {
 	allocations << "[AFTER MALLOC] [" << pending.first << "] malloc returned " << endl;
     
     PIN_ReleaseLock(&mallocLock);
-
-	
     
     // Only count if malloc succeeded (returned non-NULL)
     if (ret != 0) {
@@ -354,12 +363,7 @@ VOID PrintReport(INT32 code, VOID *v) {
         return;
     }
 
-    report << endl << "--- Allocation Report ---" << endl;
-    report << "Rust:   " << bytes_allocated_rust << " bytes" << endl;
-    report << "C:      " << bytes_allocated_c << " bytes" << endl;
-    report << "Shared: " << bytes_allocated_shared << " bytes" << endl;
-    report << "Total:  " << (bytes_allocated_rust + bytes_allocated_c + bytes_allocated_shared) << " bytes" << endl;
-    report.close();
+    allocationTracker.Report(report);
 }
 
 
@@ -377,9 +381,6 @@ int main(int argc, char *argv[]) {
 	routines.open(".baleen/routines.log");
     messages.open("baleen-messages.log");
     calls.open("baleen-calls.log");
-
-    // Initialize our global lock
-    PIN_InitLock(&global_lock);
 
     // Register TRACE instrumentation callback
     TRACE_AddInstrumentFunction(InstrumentTrace, 0);
