@@ -34,6 +34,7 @@ static UINT64 bytes_allocated_shared = 0;
 ofstream messages;
 ofstream calls;
 ofstream routines;
+ofstream allocations;
 
 static set<string> rtn_names; 
 
@@ -192,21 +193,47 @@ VOID AddAllocation(THREADID tid, ADDRINT size) {
     PIN_ReleaseLock(&global_lock);
 }
 
-// --- NEW ---
-// Analysis functions to be called *before* allocation functions
-VOID RecordMalloc(THREADID tid, ADDRINT size) {
-    AddAllocation(tid, size);
+std::map<THREADID, std::pair<unsigned long long, USIZE>> pendingMalloc;
+PIN_LOCK mallocLock;
+
+unsigned long long total_malloc_calls = 0;
+
+VOID BeforeMalloc(THREADID tid, USIZE size) {
+	// AddAllocation(tid, size);
+
+    PIN_GetLock(&global_lock, tid + 1);
+    Language l = thread_states[tid];
+    PIN_ReleaseLock(&global_lock);
+    
+
+    
+    // Queue the allocation instead of applying it immediately
+    PIN_GetLock(&mallocLock, tid + 1);
+	    allocations << "[BEFORE MALLOC] [" << total_malloc_calls << "] " << size
+            << " bytes requested by " << LanguageToString(l)
+            << "\n" << std::endl;
+    pendingMalloc[tid] = {	total_malloc_calls, size};
+	total_malloc_calls += 1;
+    PIN_ReleaseLock(&mallocLock);
 }
 
-VOID RecordCalloc(THREADID tid, ADDRINT num, ADDRINT size) {
-    AddAllocation(tid, num * size);
-}
+VOID AfterMalloc(THREADID tid, ADDRINT ret) {
+    PIN_GetLock(&mallocLock, tid + 1);
+	auto pending = pendingMalloc[tid];
+	allocations << "[AFTER MALLOC] [" << pending.first << "] malloc returned " << endl;
+    
+    PIN_ReleaseLock(&mallocLock);
 
-VOID RecordRealloc(THREADID tid, ADDRINT size) {
-    // We only care about the new size being requested.
-    // This isn't perfect (realloc can shrink, or re-use),
-    // but it's the standard way to track this.
-    AddAllocation(tid, size);
+	
+    
+    // Only count if malloc succeeded (returned non-NULL)
+    if (ret != 0) {
+        USIZE size = pending.second;
+        
+        AddAllocation(tid, size);
+    } else {
+		allocations << "[AFTER MALLOC] malloc failed, no allocation recorded.\n" << std::endl;
+	}
 }
 
 VOID InstrumentTrace(TRACE trace, VOID *v) {
@@ -270,41 +297,27 @@ VOID InstrumentImage(IMG img, VOID *v) {
 
 	routines << endl;
 
-    // Find the allocation routines
-    RTN malloc_rtn = RTN_FindByName(img, "malloc");
-    if (RTN_Valid(malloc_rtn)) {
-        messages << "  Found malloc" << endl;
-        RTN_Open(malloc_rtn);
-        RTN_InsertCall(malloc_rtn, IPOINT_BEFORE, (AFUNPTR)RecordMalloc,
-                       IARG_THREAD_ID,
-                       IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-                       IARG_END);
-        RTN_Close(malloc_rtn);
-    }
+	if (IMG_Name(img).find("libc") != string::npos) {
 
-    RTN calloc_rtn = RTN_FindByName(img, "calloc");
-    if (RTN_Valid(calloc_rtn)) {
-        messages << "  Found calloc" << endl;
-        RTN_Open(calloc_rtn);
-        RTN_InsertCall(calloc_rtn, IPOINT_BEFORE, (AFUNPTR)RecordCalloc,
-                       IARG_THREAD_ID,
-                       IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
-                       IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
-                       IARG_END);
-        RTN_Close(calloc_rtn);
-    }
+		// Find the allocation routines
+		RTN malloc_rtn = RTN_FindByName(img, "malloc");
+		if (RTN_Valid(malloc_rtn)) {
+			messages << "  Found malloc" << endl;
+			RTN_Open(malloc_rtn);
 
-    RTN realloc_rtn = RTN_FindByName(img, "realloc");
-    if (RTN_Valid(realloc_rtn)) {
-        messages << "  Found realloc" << endl;
-        RTN_Open(realloc_rtn);
-        // realloc(void *ptr, size_t size) -> we want arg 1
-        RTN_InsertCall(realloc_rtn, IPOINT_BEFORE, (AFUNPTR)RecordRealloc,
-                       IARG_THREAD_ID,
-                       IARG_FUNCARG_ENTRYPOINT_VALUE, 1,
-                       IARG_END);
-        RTN_Close(realloc_rtn);
-    }
+			RTN_InsertCall(malloc_rtn, IPOINT_BEFORE, (AFUNPTR)BeforeMalloc,
+						IARG_THREAD_ID,
+						IARG_FUNCARG_ENTRYPOINT_VALUE, 0,
+						IARG_END);
+
+			RTN_InsertCall(malloc_rtn, IPOINT_AFTER, (AFUNPTR)AfterMalloc,
+						IARG_THREAD_ID,
+						IARG_FUNCRET_EXITPOINT_VALUE, 
+						IARG_END);
+
+			RTN_Close(malloc_rtn);
+		}
+	}
 }
 
 // --- NEW ---
@@ -336,6 +349,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Open logging files
+	allocations.open(".baleen/allocations.log");
 	routines.open(".baleen/routines.log");
     messages.open("baleen-messages.log");
     calls.open("baleen-calls.log");
@@ -358,6 +372,7 @@ int main(int argc, char *argv[]) {
     PIN_StartProgram();
 
     // Close logging files
+	allocations.close();
 	routines.close();
     messages.close();
     calls.close();
