@@ -4,6 +4,7 @@
 #include <set>
 #include <map> // --- NEW --- Include map
 
+#include "language.h"
 #include "registry.h"
 
 using std::map;
@@ -13,16 +14,10 @@ using std::cerr;
 using std::endl;
 using std::ofstream;
 
-enum class Language {
-    SHARED, // Value = 0, which is std::map's default for new keys
-    RUST,
-    C
-};
-
 // --- REPLACED ---
 // static TLS_KEY tls_key; // No longer using TLS
 static PIN_LOCK global_lock; // Use a global lock for our map
-static map<THREADID, Language> thread_states; // Global map to store thread state
+// static map<THREADID, Language> thread_states; // Global map to store thread state
 
 // --- NEW ---
 // Global counters for memory allocation
@@ -38,17 +33,7 @@ ofstream allocations;
 
 static set<string> rtn_names; 
 
-string LanguageToString(Language lang) {
-    switch (lang) {
-    case Language::RUST:
-        return "RUST";
-    case Language::C:
-        return "C";
-    default:
-        return "SHARED";
-    }
-}
-
+LanguageTracker languageTracker;
 
 // All helper functions (EndsWith, IsRustModern, IsRustLegacy, IsRuntime, IsStub, IsRust)
 // remain exactly the same as in your original code.
@@ -138,35 +123,9 @@ INT32 Usage() {
 
 
 VOID CheckLanguageState(THREADID tid, ADDRINT new_lang_int, const string* rtnName) {
-    // Cast the new language from an integer back to our enum
     Language new_lang = (Language)new_lang_int;
 
-    // --- REPLACED ---
-    // We must acquire the lock before touching the global map
-    // The second argument just needs to be non-zero
-    PIN_GetLock(&global_lock, tid + 1);
-
-    // Get the *current* language from the map.
-    // If tid isn't in the map, map[tid] creates it and
-    // default-initializes it to 0, which is Language::SHARED.
-    Language current_lang = thread_states[tid];
-
-    // If the language hasn't changed, do nothing.
-    if (new_lang == current_lang) {
-        // We must release the lock before returning!
-        PIN_ReleaseLock(&global_lock);
-        return;
-    }
-
-    // A transition has occurred!
-    calls << LanguageToString(current_lang) << " -> " << LanguageToString(new_lang)
-          << " (at " << *rtnName << ")" << endl;
-
-    // **CRITICAL:** Update the thread's "current language" state in the map.
-    thread_states[tid] = new_lang;
-    
-    // **CRITICAL:** Release the lock
-    PIN_ReleaseLock(&global_lock);
+	languageTracker.CheckState(tid, new_lang, rtnName);
 }
 
 // Maps every starting address to its object (name and size).
@@ -221,11 +180,11 @@ VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
 // --- NEW ---
 // Helper function to add bytes to the correct counter
 VOID AddAllocation(THREADID tid, ADDRINT size) {
-    // Acquire lock to safely access globals
-    PIN_GetLock(&global_lock, tid + 1);
-
     // Get the language of the *caller*
-    Language lang = thread_states[tid];
+    Language lang = languageTracker.GetCurrent(tid);
+
+	// Acquire lock to safely access globals
+    PIN_GetLock(&global_lock, tid + 1);
 
     switch (lang) {
     case Language::RUST:
@@ -251,9 +210,9 @@ unsigned long long total_malloc_calls = 0;
 VOID BeforeMalloc(THREADID tid, USIZE size) {
 	// AddAllocation(tid, size);
 
-    PIN_GetLock(&global_lock, tid + 1);
-    Language l = thread_states[tid];
-    PIN_ReleaseLock(&global_lock);
+    
+    Language l = languageTracker.GetCurrent(tid);
+    
     
 
     
