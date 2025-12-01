@@ -4,10 +4,26 @@ include $(CONFIG_ROOT)/makefile.config
 include makefile.rules
 include $(TOOLS_ROOT)/Config/makefile.default.rules
 
+TOOL_CXXFLAGS += -Iinclude
+
+vpath %.cpp src
+vpath %.h include
+
 TOOL_ROOTS := baleen
 
-# Link registry.o with baleen
-$(OBJDIR)baleen$(PINTOOL_SUFFIX): $(OBJDIR)baleen$(OBJ_SUFFIX) $(OBJDIR)registry$(OBJ_SUFFIX) $(OBJDIR)language$(OBJ_SUFFIX) $(OBJDIR)allocation$(OBJ_SUFFIX) $(OBJDIR)extensions$(OBJ_SUFFIX) $(OBJDIR)utilities$(OBJ_SUFFIX) $(OBJDIR)object$(OBJ_SUFFIX)
+TOOL_TARGET := $(OBJDIR)baleen$(PINTOOL_SUFFIX)
+
+BALEEN_MODULES := baleen \
+                registry \
+                language \
+                allocation \
+                extensions \
+                utilities \
+                object
+
+BALEEN_OBJS := $(addprefix $(OBJDIR), $(addsuffix $(OBJ_SUFFIX), $(BALEEN_MODULES)))
+
+$(TOOL_TARGET): $(BALEEN_OBJS)
 	$(LINKER) $(TOOL_LDFLAGS_NOOPT) $(LINK_EXE)$@ $^ $(TOOL_LPATHS) $(TOOL_LIBS)
 
-all: obj-intel64/baleen.so
+all: $(TOOL_TARGET)
