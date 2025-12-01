@@ -4,6 +4,8 @@
 #include <set>
 #include <map> // --- NEW --- Include map
 
+#include "registry.h"
+
 using std::map;
 using std::set;
 using std::string;
@@ -31,6 +33,7 @@ static UINT64 bytes_allocated_shared = 0;
 
 ofstream messages;
 ofstream calls;
+ofstream routines;
 
 static set<string> rtn_names; 
 
@@ -72,8 +75,8 @@ BOOL IsRustLegacy(const string& name) {
 BOOL IsRuntime(const string& name) {
     static const set<string> names = {
         "_start", "deregister_tm_clones", "register_tm_clones", "__do_global_dtors_aux",
-        "frame_dummy", "main", "rust_eh_personality", ".init", "_init", ".fini", "_fini",
-        ".plt", ".plt.got", ".plt.sec", ".text", "__rust_try"
+        "frame_dummy", "rust_eh_personality", ".init", "_init", ".fini", "_fini",
+        ".plt", ".plt.got", ".plt.sec", ".text", "__rust_try", ""
     };
     return names.count(name) > 0;
 }
@@ -83,7 +86,7 @@ BOOL IsStub(const string& name) {
 }
 
 BOOL IsRust(const string& name) {
-    return IsRustModern(name) || IsRustLegacy(name);
+    return IsRustModern(name) || IsRustLegacy(name) || name == "main";
 }
 
 BOOL IMG_IsVdso(IMG img) {
@@ -101,6 +104,10 @@ Language RTN_Language(IMG img, RTN rtn) {
     // Check if the routine is in libc
     string imgName = IMG_Name(img);
     if (imgName.find("libc") != string::npos) {
+        return Language::SHARED;
+    }
+
+	if (imgName.find("libgcc") != string::npos) {
         return Language::SHARED;
     }
 
@@ -248,6 +255,21 @@ VOID InstrumentTrace(TRACE trace, VOID *v) {
 VOID InstrumentImage(IMG img, VOID *v) {
     messages << "Instrumenting image: " << IMG_Name(img) << endl;
 
+	routines << "Instrumenting image: " << IMG_Name(img) << endl;
+
+	for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec)) {
+		for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
+			string rtnName = RTN_Name(rtn);
+
+			// Determine the routine language
+			Language language = RTN_Language(img, rtn);
+
+			routines << "Inspecting " << rtnName << " (" << LanguageToString(language) << ")" << endl;
+		}
+	}
+
+	routines << endl;
+
     // Find the allocation routines
     RTN malloc_rtn = RTN_FindByName(img, "malloc");
     if (RTN_Valid(malloc_rtn)) {
@@ -314,6 +336,7 @@ int main(int argc, char *argv[]) {
     }
 
     // Open logging files
+	routines.open(".baleen/routines.log");
     messages.open("baleen-messages.log");
     calls.open("baleen-calls.log");
 
@@ -335,6 +358,7 @@ int main(int argc, char *argv[]) {
     PIN_StartProgram();
 
     // Close logging files
+	routines.close();
     messages.close();
     calls.close();
 
