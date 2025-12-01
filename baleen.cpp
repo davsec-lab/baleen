@@ -49,6 +49,7 @@ string LanguageToString(Language lang) {
     }
 }
 
+
 // All helper functions (EndsWith, IsRustModern, IsRustLegacy, IsRuntime, IsStub, IsRust)
 // remain exactly the same as in your original code.
 BOOL EndsWith(std::string_view s, std::string_view suffix) {
@@ -166,6 +167,55 @@ VOID CheckLanguageState(THREADID tid, ADDRINT new_lang_int, const string* rtnNam
     
     // **CRITICAL:** Release the lock
     PIN_ReleaseLock(&global_lock);
+}
+
+// Maps every starting address to its object (name and size).
+Registry objects;
+
+// Maps the name of every object to its starting address.
+map<string, ADDRINT> starts;
+
+// Maps the name of every object to its read count.
+map<string, map<Language, int>> reads;
+
+// Maps the name of every object to its write count.
+map<string, map<Language, int>> writes;
+
+VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
+    // Read the string name
+    std::string objectName;
+    if (name != 0) {
+        char buffer[256];
+        PIN_SafeCopy(buffer, (void*)name, sizeof(buffer) - 1);
+        buffer[255] = '\0';
+        objectName = buffer;
+    } else {
+        objectName = "unnamed";
+    }
+
+    // Map the address range to the object name
+    objects.insert(addr, size, objectName);
+    starts[objectName] = addr;
+    
+    // Initialize the counts for this object name (if not already present)
+    if (reads.find(objectName) == reads.end()) {
+        reads[objectName] = {};
+        writes[objectName] = {};
+
+        reads[objectName][Language::C] = 0;
+        reads[objectName][Language::RUST] = 0;
+
+        writes[objectName][Language::C] = 0;
+        writes[objectName][Language::RUST] = 0;
+    }
+
+    messages << "[BEFORE BALEEN] Object '" << objectName
+            << "' occupies " << size
+            << " bytes in range [0x" << std::hex << addr
+            << ", 0x" << addr + size
+            << ")\n" << std::dec << std::endl;
+
+    messages.flush();
 }
 
 // --- NEW ---
@@ -296,6 +346,21 @@ VOID InstrumentImage(IMG img, VOID *v) {
 	}
 
 	routines << endl;
+
+	RTN baleen_rtn = RTN_FindByName(img, "baleen");
+	if (RTN_Valid(baleen_rtn)) {
+		messages << "  Found baleen" << endl;
+		RTN_Open(baleen_rtn);
+
+		RTN_InsertCall(baleen_rtn, IPOINT_BEFORE, (AFUNPTR)BeforeBaleen,
+					IARG_THREAD_ID,
+					IARG_FUNCARG_ENTRYPOINT_VALUE, 0,  // Address
+					IARG_FUNCARG_ENTRYPOINT_VALUE, 1,  // Size
+					IARG_FUNCARG_ENTRYPOINT_VALUE, 2,  // Name
+					IARG_END);
+
+		RTN_Close(baleen_rtn);
+	}
 
 	if (IMG_Name(img).find("libc") != string::npos) {
 
