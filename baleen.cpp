@@ -8,38 +8,48 @@
 #include "registry.h"
 
 using std::map;
+using std::pair;
 using std::set;
 using std::string;
 using std::cerr;
 using std::endl;
 using std::ofstream;
 
-// --- REPLACED ---
-// static TLS_KEY tls_key; // No longer using TLS
-// static PIN_LOCK global_lock; // Use a global lock for our map
-// static map<THREADID, Language> thread_states; // Global map to store thread state
-
 class AllocationTracker {
 private:
 	PIN_LOCK lock;
 	map<Language, UINT64> allocations;
 	map<THREADID, map<string, pair<UINT64, USIZE>>> pending;
+	map<THREADID, map<string, UINT64>> counter;
+	ofstream log;
+	
+	VOID Allocate(THREADID tid, UINT64 bytes, Language lang) {
+		allocations[lang] += bytes;
+	}
 
 public:
 	AllocationTracker() {}
 
-	VOID Allocate(THREADID tid, UINT64 bytes, Language lang) {
+	VOID BeforeMalloc(THREADID tid, UINT64 bytes, Language lang) {
 		PIN_GetLock(&lock, tid + 1);
 
-		allocations[lang] += bytes;
+		auto id = counter[tid]["malloc"]++;
+		pending[tid]["malloc"] = { id, bytes };
 
 		PIN_ReleaseLock(&lock);
 	}
 
-	VOID BeginMalloc(THREADID tid, UINT64 bytes, Language lang) {
+	VOID AfterMalloc(THREADID tid, ADDRINT returned, Language lang) {
 		PIN_GetLock(&lock, tid + 1);
 
-		
+		auto payload = pending[tid]["malloc"];
+
+		if (returned != 0) {
+			USIZE size = payload.second;
+			Allocate(tid, size, lang);
+		} else {
+			log << "[AFTER MALLOC] [" << payload.first << "] 'malloc' failed" << endl;
+		}
 
 		PIN_ReleaseLock(&lock);
 	}
@@ -120,8 +130,6 @@ Language RTN_Language(IMG img, RTN rtn) {
         return Language::SHARED;
     }
 
-    // --- NEW CHECK ---
-    // Check if the routine is in libc
     string imgName = IMG_Name(img);
     if (imgName.find("libc") != string::npos) {
         return Language::SHARED;
@@ -210,15 +218,6 @@ VOID BeforeBaleen(ADDRINT addr, ADDRINT size, ADDRINT name) {
     messages.flush();
 }
 
-// --- NEW ---
-// Helper function to add bytes to the correct counter
-VOID AddAllocation(THREADID tid, ADDRINT size) {
-    // Get the language
-    Language lang = languageTracker.GetCurrent(tid);
-
-	allocationTracker.Allocate(tid, size, lang);
-}
-
 std::map<THREADID, std::pair<unsigned long long, USIZE>> pendingMalloc;
 PIN_LOCK mallocLock;
 
@@ -226,32 +225,12 @@ unsigned long long total_malloc_calls = 0;
 
 VOID BeforeMalloc(THREADID tid, USIZE size) {
     Language l = languageTracker.GetCurrent(tid);
-
-    // Queue the allocation instead of applying it immediately
-    PIN_GetLock(&mallocLock, tid + 1);
-	    allocations << "[BEFORE MALLOC] [" << total_malloc_calls << "] " << size
-            << " bytes requested by " << LanguageToString(l)
-            << "\n" << std::endl;
-    pendingMalloc[tid] = {	total_malloc_calls, size};
-	total_malloc_calls += 1;
-    PIN_ReleaseLock(&mallocLock);
+	allocationTracker.BeforeMalloc(tid, size, l);
 }
 
 VOID AfterMalloc(THREADID tid, ADDRINT ret) {
-    PIN_GetLock(&mallocLock, tid + 1);
-	auto pending = pendingMalloc[tid];
-	allocations << "[AFTER MALLOC] [" << pending.first << "] malloc returned " << endl;
-    
-    PIN_ReleaseLock(&mallocLock);
-    
-    // Only count if malloc succeeded (returned non-NULL)
-    if (ret != 0) {
-        USIZE size = pending.second;
-        
-        AddAllocation(tid, size);
-    } else {
-		allocations << "[AFTER MALLOC] malloc failed, no allocation recorded.\n" << std::endl;
-	}
+	Language l = languageTracker.GetCurrent(tid);
+	allocationTracker.AfterMalloc(tid, ret, l);
 }
 
 VOID InstrumentTrace(TRACE trace, VOID *v) {
@@ -295,8 +274,6 @@ VOID InstrumentTrace(TRACE trace, VOID *v) {
     }
 }
 
-// --- NEW ---
-// This function is called for every image load
 VOID InstrumentImage(IMG img, VOID *v) {
     messages << "Instrumenting image: " << IMG_Name(img) << endl;
 
@@ -353,8 +330,6 @@ VOID InstrumentImage(IMG img, VOID *v) {
 	}
 }
 
-// --- NEW ---
-// This function is called when the application exits
 VOID PrintReport(INT32 code, VOID *v) {
     // We re-open the messages file in append mode to add our report
     ofstream report("baleen-messages.log", std::ios::app);
@@ -365,7 +340,6 @@ VOID PrintReport(INT32 code, VOID *v) {
 
     allocationTracker.Report(report);
 }
-
 
 int main(int argc, char *argv[]) {
     // Initialize symbol processing
