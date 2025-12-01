@@ -94,6 +94,20 @@ public:
 		}
 	}
 
+	VOID RemoveObject(THREADID tid, ADDRINT addr) {
+		Node *object = objects.remove(addr);
+
+		if (object) {
+			log << "[REMOVE OBJECT] Object '" << object->name
+				<< "' is no longer mapped to range [0x" << hex << object->start
+				<< ", 0x" << object->start + object->size
+				<< ")" << dec << endl;
+		
+			// TODO: Is this a good way to handle the start address mapping?
+			starts[object->name] = 0;
+		}
+	}
+
 	VOID RecordWrite(THREADID tid, ADDRINT addr, Language lang) {
 		PIN_GetLock(&lock, tid + 1);
 
@@ -128,7 +142,7 @@ public:
 	}
 
 	VOID Report(ofstream& stream) {
-		stream << "Name, Reads (Rust), Reads (C), Writes (Rust), Writes (C)" << std::endl;
+		stream << "Name | Reads (Rust) | Reads (C) | Writes (Rust) | Writes (C)" << endl;
 
 		for (const auto& pair : reads) {
 			const string& objName = pair.first;
@@ -143,7 +157,7 @@ public:
 			int rustWrites = writes[objName][Language::RUST];
 			int cWrites = writes[objName][Language::C];
 
-			stream << rustWrites << ", " << cWrites << std::endl;
+			stream << rustWrites << ", " << cWrites << endl;
 		}
 
 		stream << endl;

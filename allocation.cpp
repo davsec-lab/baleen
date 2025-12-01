@@ -58,6 +58,10 @@ VOID AllocationTracker::AfterRealloc(THREADID tid, ADDRINT newAddr, ObjectTracke
 	PIN_ReleaseLock(&lock);
 }
 
+VOID AllocationTracker::BeforeFree(THREADID tid, ADDRINT addr, ObjectTracker& objectTracker) {
+	objectTracker.RemoveObject(tid, addr);
+}
+
 VOID AllocationTracker::Report(ofstream& stream) {
 	auto rustBytes = allocations[Language::RUST];
 	auto cBytes = allocations[Language::C];

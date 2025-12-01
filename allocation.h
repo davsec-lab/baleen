@@ -35,6 +35,8 @@ public:
 	VOID BeforeRealloc(THREADID tid, ADDRINT oldAddr, USIZE size, Language lang);
 	VOID AfterRealloc(THREADID tid, ADDRINT newAddr, ObjectTracker& objectTracker);
 
+	VOID BeforeFree(THREADID tid, ADDRINT newAddr, ObjectTracker& objectTracker);
+
 	VOID Report(ofstream& stream);
 };
 

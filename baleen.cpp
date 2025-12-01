@@ -34,12 +34,12 @@ VOID CheckLanguageState(THREADID tid, ADDRINT newLang, const string* rtnName) {
 
 VOID RecordMemRead(THREADID tid, ADDRINT ip, ADDRINT addr) {
     Language lang = languageTracker.GetCurrent(tid);
-	objectTracker.RecordWrite(tid, addr, lang);
+	objectTracker.RecordRead(tid, addr, lang);
 }
 
 VOID RecordMemWrite(THREADID tid, ADDRINT ip, ADDRINT addr) {
     Language lang = languageTracker.GetCurrent(tid);
-	objectTracker.RecordRead(tid, addr, lang);
+	objectTracker.RecordWrite(tid, addr, lang);
 }
 
 VOID Instruction(INS ins, VOID *v) {
@@ -88,6 +88,10 @@ VOID BeforeRealloc(THREADID tid, ADDRINT addr, USIZE size) {
 
 VOID AfterRealloc(THREADID tid, ADDRINT addr) {
 	allocationTracker.AfterRealloc(tid, addr, objectTracker);
+}
+
+VOID BeforeFree(THREADID tid, ADDRINT addr) {
+    allocationTracker.BeforeFree(tid, addr, objectTracker);
 }
 
 VOID InstrumentTrace(TRACE trace, VOID *v) {
@@ -177,6 +181,11 @@ VOID InstrumentImage(IMG img, VOID *v) {
 							 (AFUNPTR) AfterRealloc,
 							 IARG_THREAD_ID,
 							 IARG_FUNCRET_EXITPOINT_VALUE);
+
+        RTN_InstrumentByName(img, "free", IPOINT_BEFORE,
+							 (AFUNPTR) BeforeFree,
+							 IARG_THREAD_ID,
+                             IARG_FUNCARG_ENTRYPOINT_VALUE, 0);
 	}
 }
 
