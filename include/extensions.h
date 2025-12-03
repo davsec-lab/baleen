@@ -13,6 +13,8 @@ using std::set;
 
 BOOL IMG_IsVdso(IMG img);
 
+BOOL IMG_IsRuntime(string imgName);
+
 BOOL RTN_IsRuntime(RTN rtn);
 
 BOOL RTN_IsPLTStub(RTN rtn);

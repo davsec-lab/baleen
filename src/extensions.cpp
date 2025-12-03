@@ -6,6 +6,22 @@ BOOL IMG_IsVdso(IMG img) {
     return names.count(imgName) > 0;
 }
 
+BOOL IMG_IsRuntime(string imgName) {
+	// string imgName = IMG_Name(img);
+
+	static const set<string> images = {
+		"libc.so.6",
+		"libm.so.6",
+		"libgcc_s.so.1",
+		"libresolv.so.2",
+		"libstdc++.so.6",
+		"linux-vdso.so.1",
+		"ld-linux-x86-64.so.2",
+	};
+
+	return images.count(imgName) > 0;
+}
+
 BOOL RTN_IsRuntime(RTN rtn) {
 	string name = RTN_Name(rtn);
 
