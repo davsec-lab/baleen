@@ -9,42 +9,47 @@ string LanguageToString(Language lang) {
     }
 }
 
-LanguageTracker::LanguageTracker() {
-	log.open(".baleen/foreigns.log");
-}
-
-VOID LanguageTracker::CheckState(THREADID tid, Language newLang, const string* rtnName) {
-	// Obtain the lock
-	PIN_GetLock(&lock, tid + 1);
-
-	// Get the current language
-	Language curLang = language[tid];
-
-	// If the language hasn't changed, do nothing
-	if (newLang == curLang) {
-		// We must release the lock before returning!
-		PIN_ReleaseLock(&lock);
-		return;
-	}
-
-	// A transition has occurred!
-	log << LanguageToString(curLang) << " → " << LanguageToString(newLang) << " (at " << *rtnName << ")" << endl;
-
-	// Update the thread's current language
-	language[tid] = newLang;
-	
-	// Release the lock
-	PIN_ReleaseLock(&lock);
-}
-
 Language LanguageTracker::GetCurrent(THREADID tid) {
-	// Obtain the lock
 	PIN_GetLock(&lock, tid + 1);
-
 	Language lang = language[tid];
-
-	// Release the lock
 	PIN_ReleaseLock(&lock);
 
 	return lang;
+}
+
+VOID LanguageTracker::Enter(THREADID tid, Language newLang) {
+	PIN_GetLock(&lock, tid + 1);
+
+	// Get current language
+	Language curLang = language[tid];
+
+	// Remember the current language for when this function exits
+	remembered[tid].push(curLang);
+
+	// Update the new language
+	language[tid] = newLang;
+
+	log << "[LANGUAGE] " << LanguageToString(curLang)
+		<< " → " << LanguageToString(newLang) << endl;
+
+	PIN_ReleaseLock(&lock);
+}
+
+VOID LanguageTracker::Exit(THREADID tid) {
+	PIN_GetLock(&lock, tid + 1);
+
+	// Get the current language and the language of our caller
+	Language curLang = language[tid];
+	Language newLang = remembered[tid].top();
+
+	// Pop the current language since this function is done
+	remembered[tid].pop();
+
+	// Set language back to what it was before function call
+	language[tid] = newLang;
+
+	log << "[LANGUAGE] " << LanguageToString(curLang)
+		<< " → " << LanguageToString(newLang) << endl;
+
+	PIN_ReleaseLock(&lock);	
 }

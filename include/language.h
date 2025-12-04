@@ -32,41 +32,12 @@ private:
 
 public:
 	LanguageTracker(ofstream& l): log(l) {}
-	
-	VOID CheckState(THREADID tid, Language newLang, const string* rtnName);
-	
+
 	Language GetCurrent(THREADID tid);
 
-	VOID Enter(THREADID tid, Language newLang) {
-		PIN_GetLock(&lock, tid + 1);
+	VOID Enter(THREADID tid, Language newLang);
 
-		Language curLang = language[tid];
-
-		remembered[tid].push(curLang);
-
-		language[tid] = newLang;
-
-		log << "[LANGUAGE]" << LanguageToString(curLang)
-			<< " → " << LanguageToString(newLang) << endl;
-
-		PIN_ReleaseLock(&lock);
-	}
-
-	VOID Exit(THREADID tid) {
-		PIN_GetLock(&lock, tid + 1);
-
-		Language curLang = language[tid];
-		Language newLang = remembered[tid].top();
-
-		remembered[tid].pop();
-
-		language[tid] = newLang;
-
-		log << "[LANGUAGE]" << LanguageToString(curLang)
-			<< " → " << LanguageToString(newLang) << endl;
-
-		PIN_ReleaseLock(&lock);	
-	}
+	VOID Exit(THREADID tid);
 };
 
 #endif // LANGUAGE_H

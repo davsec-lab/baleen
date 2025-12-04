@@ -22,7 +22,7 @@ ofstream allocations;
 ofstream accesses;
 ofstream foreigns;
 
-PIN_LOCK foreignlock;
+PIN_LOCK logLock;
 
 // Storage for strings to ensure pointers remain valid during execution
 static set<string> rtn_names; 
@@ -53,44 +53,35 @@ VOID RecordMemWrite(THREADID tid, ADDRINT ip, ADDRINT addr) {
     objectTracker.RecordWrite(tid, addr, lang);
 }
 
-std::string extractFileName(const std::string& fullPath) {
-    size_t lastSlashPos = fullPath.rfind('/');
-    if (lastSlashPos == std::string::npos) {
-        return fullPath;
-    } else {
-        return fullPath.substr(lastSlashPos + 1);
-    }
-}
-
-// Updated to accept function name
 VOID BeforeRust(THREADID tid, char* name) {
-    PIN_GetLock(&foreignlock, tid + 1);
+	PIN_GetLock(&logLock, tid + 1);
     foreigns << "[ENTER RUST] " << name << endl;
-    PIN_ReleaseLock(&foreignlock);
+	PIN_ReleaseLock(&logLock);
+
     languageTracker.Enter(tid, Language::RUST);
 }
 
-// Updated to accept function name
 VOID AfterRust(THREADID tid, char* name) {
-    PIN_GetLock(&foreignlock, tid + 1);
+	PIN_GetLock(&logLock, tid + 1);
     foreigns << "[EXIT RUST] " << name << endl;
-    PIN_ReleaseLock(&foreignlock);
+	PIN_ReleaseLock(&logLock);
+
     languageTracker.Exit(tid);
 }
 
-// Updated to accept function name
 VOID BeforeC(THREADID tid, char* name) {
-    PIN_GetLock(&foreignlock, tid + 1);
+	PIN_GetLock(&logLock, tid + 1);
     foreigns << "[ENTER C] " << name << endl;
-    PIN_ReleaseLock(&foreignlock);
+	PIN_ReleaseLock(&logLock);
+
     languageTracker.Enter(tid, Language::C);
 }
 
-// Updated to accept function name
 VOID AfterC(THREADID tid, char* name) {
-    PIN_GetLock(&foreignlock, tid + 1);
+	PIN_GetLock(&logLock, tid + 1);
     foreigns << "[EXIT C] " << name << endl;
-    PIN_ReleaseLock(&foreignlock);
+	PIN_ReleaseLock(&logLock);
+
     languageTracker.Exit(tid);
 }
 
@@ -107,7 +98,7 @@ bool IsIndirectCallToC(ADDRINT target, const string& caller_file) {
     
     ADDRINT rtnAddr = RTN_Address(target_rtn);
     IMG img = IMG_FindByAddress(rtnAddr);
-    string timg = extractFileName(IMG_Name(img));
+    string timg = ExtractFileName(IMG_Name(img));
 
     if (IMG_IsRuntime(timg) || RTN_IsRuntime(target_rtn) || RTN_IsPLTStub(target_rtn)) {
         return false;
@@ -124,17 +115,15 @@ VOID BeforeIndirectCall(THREADID tid, ADDRINT caller_ip, ADDRINT target, string*
         RTN target_rtn = RTN_FindByAddress(target);
         string target_name = RTN_Name(target_rtn);
         IMG img = IMG_FindByAddress(RTN_Address(target_rtn));
-        string timg = extractFileName(IMG_Name(img));
+        string timg = ExtractFileName(IMG_Name(img));
         
-        PIN_GetLock(&foreignlock, tid + 1);
+		PIN_GetLock(&logLock, tid + 1);
         foreigns << "[CALL] '" << target_name 
                  << "' from Rust file '" << *file
                  << " in image '" << timg
                  << "'" << endl;
-        PIN_ReleaseLock(&foreignlock);
+		PIN_ReleaseLock(&logLock);
 
-        // Pass the resolved name to BeforeC
-        // We cast to char* because we are calling it directly, and we know valid scope
         BeforeC(tid, (char*)target_name.c_str());
 
         PIN_UnlockClient();
@@ -152,7 +141,7 @@ VOID AfterIndirectCall(THREADID tid, ADDRINT target, string* file) {
         string target_name = RTN_Name(target_rtn);
 
         PIN_UnlockClient();
-        // Pass the name to AfterC
+
         AfterC(tid, (char*)target_name.c_str());
         return;
     }
@@ -184,8 +173,8 @@ VOID Instruction(INS ins, VOID *v) {
         if (RTN_Valid(target_rtn)) {
             IMG target_img = IMG_FindByAddress(target);
 
-            string timg = extractFileName(IMG_Name(target_img));
-            string cimg = extractFileName(IMG_Name(caller_img));
+            string timg = ExtractFileName(IMG_Name(target_img));
+            string cimg = ExtractFileName(IMG_Name(caller_img));
             string target_name = RTN_Name(target_rtn);
 
             if (IMG_IsRuntime(timg) || RTN_IsRuntime(target_rtn) || RTN_IsPLTStub(target_rtn)) {
@@ -223,7 +212,6 @@ VOID Instruction(INS ins, VOID *v) {
             }
         }
     } else {
-        // === INDIRECT CALL === //
         INS_InsertCall(
             ins, IPOINT_BEFORE,
             (AFUNPTR)BeforeIndirectCall,
@@ -243,7 +231,6 @@ VOID Instruction(INS ins, VOID *v) {
             IARG_PTR, new string(file),
             IARG_END
         );
-        // === INDIRECT CALL === //
     }
 
     // Instrument memory reads/writes

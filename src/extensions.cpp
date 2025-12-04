@@ -1,5 +1,7 @@
 #include "extensions.h"
 
+using std::isxdigit;
+
 BOOL IMG_IsVdso(IMG img) {
     string imgName = IMG_Name(img);
     static const set<string> names = {"[vdso]", "[linux-gate.so.1]", "[linux-vdso.so.1]"};
@@ -26,9 +28,21 @@ BOOL RTN_IsRuntime(RTN rtn) {
 	string name = RTN_Name(rtn);
 
     static const set<string> names = {
-        "_start", "deregister_tm_clones", "register_tm_clones", "__do_global_dtors_aux",
-        "frame_dummy", "rust_eh_personality", ".init", "_init", ".fini", "_fini",
-        ".plt", ".plt.got", ".plt.sec", ".text", "__rust_try", ""
+        "_start",
+		"deregister_tm_clones",
+		"register_tm_clones",
+		"__do_global_dtors_aux",
+        "frame_dummy",
+		"rust_eh_personality",
+		".init",
+		"_init",
+		".fini",
+		"_fini",
+        ".plt",
+		".plt.got",
+		".plt.sec",
+		".text",
+		"__rust_try"
     };
 
     return names.count(name) > 0;
@@ -47,13 +61,17 @@ BOOL RTN_IsRustModern(RTN rtn) {
 	string name = RTN_Name(rtn);
 
     size_t len = name.length();
-    if (len < 19) return false;
+    
+	if (len < 19) return false;
     if (name[len - 1] != 'E') return false;
     if (name[len - 20] != '1' || name[len - 19] != '7' || name[len - 18] != 'h') return false;
+
     for (size_t i = len - 17; i < len - 1; ++i) {
-        if (!std::isxdigit(static_cast<unsigned char>(name[i]))) return false;
+        if (!isxdigit(static_cast<unsigned char>(name[i]))) return false;
     }
+
     if (name.rfind("_ZN", 0) != 0) return false;
+
     return true;
 }
 
