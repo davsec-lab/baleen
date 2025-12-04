@@ -65,35 +65,3 @@ BOOL RTN_IsRustLegacy(RTN rtn) {
 BOOL RTN_IsRust(RTN rtn) {
     return RTN_IsRustModern(rtn) || RTN_IsRustLegacy(rtn) || RTN_IsMain(rtn);
 }
-
-
-Language RTN_Language(IMG img, RTN rtn) {
-    if (IMG_IsInterpreter(img) || IMG_IsVdso(img)) {
-        return Language::SHARED;
-    }
-
-    string imgName = IMG_Name(img);
-
-    if (imgName.find("libc") != string::npos) {
-        return Language::SHARED;
-    }
-
-	if (imgName.find("libgcc") != string::npos) {
-        return Language::SHARED;
-    }
-
-    if (imgName.find("libblkid") != string::npos) {
-        return Language::SHARED;
-    }
-
-    string rtnName = RTN_Name(rtn);
-
-    if (RTN_IsPLTStub(rtn) || RTN_IsRuntime(rtn)) {
-        return Language::SHARED;
-    }
-
-    if (IMG_IsMainExecutable(img)) {
-        return RTN_IsRust(rtn) ? Language::RUST : Language::C;
-    }
-    return Language::C;
-}

@@ -55,11 +55,9 @@ public:
 
         reads[objectName][Language::C] = 0;
         reads[objectName][Language::RUST] = 0;
-		reads[objectName][Language::SHARED] = 0;
 
         writes[objectName][Language::C] = 0;
         writes[objectName][Language::RUST] = 0;
-		writes[objectName][Language::SHARED] = 0;
 
 		log << "[REGISTER OBJECT] Object '" << objectName
 			<< "' occupies " << size

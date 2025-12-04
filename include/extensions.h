@@ -3,6 +3,7 @@
 
 #include "pin.H"
 
+
 #include "language.h"
 #include "utilities.h"
 
@@ -27,12 +28,21 @@ BOOL RTN_IsRustLegacy(RTN rtn);
 
 BOOL RTN_IsRust(RTN rtn);
 
-Language RTN_Language(IMG img, RTN rtn);
-
 template<typename... Args>
 VOID RTN_InstrumentByName(IMG img, const char* name, IPOINT ipoint, AFUNPTR fun, Args... args) {
 	RTN rtn = RTN_FindByName(img, name);
 
+	if (RTN_Valid(rtn)) {
+        RTN_Open(rtn);
+        
+        RTN_InsertCall(rtn, ipoint, fun, args..., IARG_END);
+        
+        RTN_Close(rtn);
+    }
+}
+
+template<typename... Args>
+VOID RTN_Instrument(IMG img, RTN rtn, IPOINT ipoint, AFUNPTR fun, Args... args) {
 	if (RTN_Valid(rtn)) {
         RTN_Open(rtn);
         

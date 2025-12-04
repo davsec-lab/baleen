@@ -65,11 +65,9 @@ VOID AllocationTracker::BeforeFree(THREADID tid, ADDRINT addr, ObjectTracker& ob
 VOID AllocationTracker::Report(ofstream& stream) {
 	auto rustBytes = allocations[Language::RUST];
 	auto cBytes = allocations[Language::C];
-	auto sharedBytes = allocations[Language::SHARED];
 
 	stream << endl << "--- Allocation Report ---" << endl;
 	stream << "Rust:   " << rustBytes << " bytes" << endl;
 	stream << "C:      " << cBytes << " bytes" << endl;
-	stream << "Shared: " << sharedBytes << " bytes" << endl;
-	stream << "Total:  " << (rustBytes + cBytes + sharedBytes) << " bytes" << endl;
+	stream << "Total:  " << (rustBytes + cBytes) << " bytes" << endl;
 }

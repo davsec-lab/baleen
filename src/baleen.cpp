@@ -19,10 +19,12 @@ ofstream allocations;
 ofstream accesses;
 ofstream foreigns;
 
+PIN_LOCK foreignlock;
+
 static set<string> rtn_names; 
 
 AllocationTracker allocationTracker;
-LanguageTracker languageTracker;
+LanguageTracker languageTracker(foreigns);
 ObjectTracker objectTracker;
 
 INT32 Usage() {
@@ -31,10 +33,10 @@ INT32 Usage() {
     return -1;
 }
 
-VOID CheckLanguageState(THREADID tid, ADDRINT newLang, const string* rtnName) {
-    Language lang = (Language) newLang;
-    languageTracker.CheckState(tid, lang, rtnName);
-}
+// VOID CheckLanguageState(THREADID tid, ADDRINT newLang, const string* rtnName) {
+//     Language lang = (Language) newLang;
+//     languageTracker.CheckState(tid, lang, rtnName);
+// }
 
 VOID RecordMemRead(THREADID tid, ADDRINT ip, ADDRINT addr) {
     Language lang = languageTracker.GetCurrent(tid);
@@ -62,39 +64,83 @@ std::string extractFileName(const std::string& fullPath) {
     }
 }
 
-VOID RecordIndirectCall(THREADID tid, ADDRINT caller_ip, ADDRINT target, string* file, UINT32 line) {
-    if (!EndsWith(*file, ".rs")) {
-        return; // Caller is not Rust
+VOID BeforeRust(THREADID tid) {
+	languageTracker.Enter(tid, Language::RUST);
+}
+
+VOID AfterRust(THREADID tid) {
+	languageTracker.Exit(tid);
+}
+
+VOID BeforeC(THREADID tid) {
+	languageTracker.Enter(tid, Language::C);
+}
+
+VOID AfterC(THREADID tid) {
+	languageTracker.Exit(tid);
+}
+
+// Helper function to check if an indirect call target is a non-Rust function
+bool IsIndirectCallToC(ADDRINT target, const string& caller_file) {
+    if (!EndsWith(caller_file, ".rs")) {
+        return false; // Caller is not Rust
     }
     
-    PIN_LockClient();
     RTN target_rtn = RTN_FindByAddress(target);
+    
+    if (!RTN_Valid(target_rtn)) {
+        return false;
+    }
+    
+    ADDRINT rtnAddr = RTN_Address(target_rtn);
+    IMG img = IMG_FindByAddress(rtnAddr);
+    string timg = extractFileName(IMG_Name(img));
 
-	ADDRINT rtnAddr = RTN_Address(target_rtn);
-	IMG img = IMG_FindByAddress(rtnAddr);
+    if (IMG_IsRuntime(timg) || RTN_IsRuntime(target_rtn) || RTN_IsPLTStub(target_rtn)) {
+        return false;
+    }
 
-	string timg = extractFileName(IMG_Name(img));
+    bool target_is_rust = RTN_IsRust(target_rtn);
+    return !target_is_rust;
+}
 
-	if (IMG_IsRuntime(timg) || RTN_IsRuntime(target_rtn) || RTN_IsPLTStub(target_rtn)) {
-		PIN_UnlockClient();
-		return;
-	};
-
-    if (RTN_Valid(target_rtn)) {
-        bool target_is_rust = RTN_IsRust(target_rtn);
+VOID BeforeIndirectCall(THREADID tid, ADDRINT caller_ip, ADDRINT target, string* file, UINT32 line) {
+    PIN_LockClient();
+    
+    if (IsIndirectCallToC(target, *file)) {
+        RTN target_rtn = RTN_FindByAddress(target);
+        string target_name = RTN_Name(target_rtn);
+        IMG img = IMG_FindByAddress(RTN_Address(target_rtn));
+        string timg = extractFileName(IMG_Name(img));
         
-        if (!target_is_rust) {
-            string target_name = RTN_Name(target_rtn);
-            foreigns << "IND call to '" << target_name 
-                     << "' from Rust file '" << *file
-					 << " in image '" << timg
-					 << "'" << endl;
-        }
+		PIN_GetLock(&foreignlock, tid + 1);
+        foreigns << "[CALL] '" << target_name 
+                 << "' from Rust file '" << *file
+                 << " in image '" << timg
+                 << "'" << endl;
+
+        PIN_ReleaseLock(&foreignlock);
+
+        BeforeC(tid);
+
+		PIN_UnlockClient();
+        return;
     }
     
     PIN_UnlockClient();
 }
 
+VOID AfterIndirectCall(THREADID tid, ADDRINT target, string* file) {
+    PIN_LockClient();
+    
+    if (IsIndirectCallToC(target, *file)) {
+        PIN_UnlockClient();
+        AfterC(tid);
+        return;
+    }
+    
+    PIN_UnlockClient();
+}
 
 
 VOID Instruction(INS ins, VOID *v) {
@@ -123,6 +169,7 @@ VOID Instruction(INS ins, VOID *v) {
             IMG target_img = IMG_FindByAddress(target);
 
 			string timg = extractFileName(IMG_Name(target_img));
+			string cimg = extractFileName(IMG_Name(caller_img));
 
 			// foreigns << "inside image '" << timg << "'" << endl;
 
@@ -140,22 +187,47 @@ VOID Instruction(INS ins, VOID *v) {
             if (caller_is_rust && !target_is_rust) {
                 foreigns << "DIR call to '" << target_name 
                          << "' from Rust file '" << file
-						 << "' in image '" << timg
+						 << "' in image '" << cimg
 						 << "'" << endl;
+				
+				INS_InsertCall(
+					ins, IPOINT_BEFORE,
+					(AFUNPTR) BeforeC,
+					IARG_THREAD_ID,
+					IARG_END
+				);
+				
+				INS_InsertCall(
+					ins, IPOINT_TAKEN_BRANCH,
+					(AFUNPTR) AfterC,
+					IARG_THREAD_ID,
+					IARG_END
+				);
             }
         }
     } else {
-        // Indirect call - we need runtime instrumentation
-        INS_InsertCall(
-            ins, IPOINT_BEFORE,
-            (AFUNPTR)RecordIndirectCall,
-            IARG_THREAD_ID,
-            IARG_INST_PTR,
-            IARG_BRANCH_TARGET_ADDR,
-            IARG_PTR, new string(file),
-            IARG_UINT32, line,
-            IARG_END
-        );
+// === INDIRECT CALL === //
+INS_InsertCall(
+    ins, IPOINT_BEFORE,
+    (AFUNPTR)BeforeIndirectCall,
+    IARG_THREAD_ID,
+    IARG_INST_PTR,
+    IARG_BRANCH_TARGET_ADDR,
+    IARG_PTR, new string(file),
+    IARG_UINT32, line,
+    IARG_END
+);
+
+// Instrument the return address instead
+INS_InsertCall(
+    ins, IPOINT_TAKEN_BRANCH,
+    (AFUNPTR)AfterIndirectCall,
+    IARG_THREAD_ID,
+    IARG_BRANCH_TARGET_ADDR,
+    IARG_PTR, new string(file),
+    IARG_END
+);
+// === INDIRECT CALL === //
     }
 
     // Instrument memory reads
@@ -209,46 +281,46 @@ VOID BeforeFree(THREADID tid, ADDRINT addr) {
     allocationTracker.BeforeFree(tid, addr, objectTracker);
 }
 
-VOID InstrumentTrace(TRACE trace, VOID *v) {
-    // Get the address of the first instruction in the trace
-    ADDRINT trace_addr = TRACE_Address(trace);
+// VOID InstrumentTrace(TRACE trace, VOID *v) {
+//     // Get the address of the first instruction in the trace
+//     ADDRINT trace_addr = TRACE_Address(trace);
 
-    // We must lock Pin to safely look up routine information
-    PIN_LockClient();
+//     // We must lock Pin to safely look up routine information
+//     PIN_LockClient();
     
-    RTN rtn = RTN_FindByAddress(trace_addr);
+//     RTN rtn = RTN_FindByAddress(trace_addr);
 
-    Language trace_lang = Language::SHARED;
-    string rtnName = "unknown";
+//     Language trace_lang = Language::SHARED;
+//     string rtnName = "unknown";
 
-    if (RTN_Valid(rtn)) {
-        SEC sec = RTN_Sec(rtn);
-        if (SEC_Valid(sec)) {
-            IMG img = SEC_Img(sec);
-            if (IMG_Valid(img)) {
-                // Use our existing helper to find the language of this routine
-                trace_lang = RTN_Language(img, rtn);
-                rtnName = RTN_Name(rtn);
-            }
-        }
-    }
+//     if (RTN_Valid(rtn)) {
+//         SEC sec = RTN_Sec(rtn);
+//         if (SEC_Valid(sec)) {
+//             IMG img = SEC_Img(sec);
+//             if (IMG_Valid(img)) {
+//                 // Use our existing helper to find the language of this routine
+//                 trace_lang = RTN_Language(img, rtn);
+//                 rtnName = RTN_Name(rtn);
+//             }
+//         }
+//     }
     
-    // Unlock Pin as we are done looking up symbols
-    PIN_UnlockClient();
+//     // Unlock Pin as we are done looking up symbols
+//     PIN_UnlockClient();
 
-    if (trace_lang != Language::SHARED) {
-        // Get a stable pointer to the routine name string
-        auto it = rtn_names.insert(rtnName);
-        const string* rtnNamePtr = &(*it.first);
+//     if (trace_lang != Language::SHARED) {
+//         // Get a stable pointer to the routine name string
+//         auto it = rtn_names.insert(rtnName);
+//         const string* rtnNamePtr = &(*it.first);
 
-        // Insert a call to our analysis function (CheckLanguageState)
-        TRACE_InsertCall(trace, IPOINT_BEFORE, (AFUNPTR)CheckLanguageState,
-                         IARG_THREAD_ID,
-                         IARG_ADDRINT, (ADDRINT)trace_lang,
-                         IARG_PTR, rtnNamePtr,
-                         IARG_END);
-    }
-}
+//         // Insert a call to our analysis function (CheckLanguageState)
+//         TRACE_InsertCall(trace, IPOINT_BEFORE, (AFUNPTR)CheckLanguageState,
+//                          IARG_THREAD_ID,
+//                          IARG_ADDRINT, (ADDRINT)trace_lang,
+//                          IARG_PTR, rtnNamePtr,
+//                          IARG_END);
+//     }
+// }
 
 VOID InstrumentImage(IMG img, VOID *v) {
     messages << "Instrumenting image: " << IMG_Name(img) << endl;
@@ -263,9 +335,19 @@ VOID InstrumentImage(IMG img, VOID *v) {
             INT32 line;
             PIN_GetSourceLocation(RTN_Address(rtn), NULL, &line, &file);
 
-            if (EndsWith(file, ".rs")) {
+            if (EndsWith(file, ".rs") || RTN_IsRust(rtn)) {
                 routines << "(RUST) " << rtnName << endl;
-            }
+
+				RTN_Instrument(img, rtn, IPOINT_BEFORE,
+                             (AFUNPTR) BeforeRust,
+                             IARG_THREAD_ID);
+				
+				RTN_Instrument(img, rtn, IPOINT_AFTER,
+                             (AFUNPTR) AfterRust,
+                             IARG_THREAD_ID);
+            } else {
+				routines << "(NOT RUST) " << rtnName << endl;
+			}
 
             // Determine the routine language
             // Language language = RTN_Language(img, rtn);
@@ -345,7 +427,7 @@ int main(int argc, char *argv[]) {
     accesses.open("baleen-accesses.log");
 
     // Register TRACE instrumentation callback
-    TRACE_AddInstrumentFunction(InstrumentTrace, 0);
+    // TRACE_AddInstrumentFunction(InstrumentTrace, 0);
 
     // Register IMAGE instrumentation callback
     IMG_AddInstrumentFunction(InstrumentImage, 0);

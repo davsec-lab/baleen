@@ -4,15 +4,13 @@ string LanguageToString(Language lang) {
     switch (lang) {
     case Language::RUST:
         return "RUST";
-    case Language::C:
-        return "C";
     default:
-        return "SHARED";
+        return "C";
     }
 }
 
 LanguageTracker::LanguageTracker() {
-	log.open("./baleen/language.log");
+	log.open(".baleen/foreigns.log");
 }
 
 VOID LanguageTracker::CheckState(THREADID tid, Language newLang, const string* rtnName) {
