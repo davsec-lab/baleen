@@ -1,4 +1,5 @@
 #include "language.h"
+#include "logger.h"
 
 string LanguageToString(Language lang) {
     switch (lang) {
@@ -29,7 +30,7 @@ VOID LanguageTracker::Enter(THREADID tid, Language newLang) {
 	// Update the new language
 	language[tid] = newLang;
 
-	log << "[LANGUAGE] " << LanguageToString(curLang)
+	logger.Stream(LogSubject::EXECUTION) << "[LANGUAGE] " << LanguageToString(curLang)
 		<< " → " << LanguageToString(newLang) << endl;
 
 	PIN_ReleaseLock(&lock);
@@ -48,7 +49,7 @@ VOID LanguageTracker::Exit(THREADID tid) {
 	// Set language back to what it was before function call
 	language[tid] = newLang;
 
-	log << "[LANGUAGE] " << LanguageToString(curLang)
+	logger.Stream(LogSubject::EXECUTION) << "[LANGUAGE] " << LanguageToString(curLang)
 		<< " → " << LanguageToString(newLang) << endl;
 
 	PIN_ReleaseLock(&lock);	

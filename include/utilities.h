@@ -10,4 +10,6 @@ BOOL EndsWith(string_view s, string_view suffix);
 
 string ExtractFileName(const string& fullPath);
 
+int Run(const char* command);
+
 #endif // UTILITIES_H

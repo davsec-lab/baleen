@@ -15,7 +15,7 @@ using std::tuple;
 class AllocationTracker {
 private:
 	PIN_LOCK lock;
-	ofstream log;
+	Logger& logger;
 
 	map<Language, UINT64> allocations;
 
@@ -28,7 +28,7 @@ private:
 	VOID Allocate(THREADID tid, UINT64 bytes, Language lang);
 
 public:
-	AllocationTracker();
+	AllocationTracker(Logger& l);
 
 	VOID BeforeMalloc(THREADID tid, UINT64 bytes, Language lang);
 	VOID AfterMalloc(THREADID tid, ADDRINT returned, Language lang, ObjectTracker& objectTracker);

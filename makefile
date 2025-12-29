@@ -19,7 +19,8 @@ BALEEN_MODULES := baleen \
                 allocation \
                 extensions \
                 utilities \
-                object
+                object \
+                logger
 
 BALEEN_OBJS := $(addprefix $(OBJDIR), $(addsuffix $(OBJ_SUFFIX), $(BALEEN_MODULES)))
 

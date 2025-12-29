@@ -2,6 +2,8 @@
 #include <link.h>
 #include <cstdlib>
 #include <sys/wait.h>
+#include <fstream>
+#include <unistd.h>
 
 #include "pin.H"
 
@@ -11,20 +13,14 @@
 #include "utilities.h"
 #include "registry.h"
 #include "object.h"
+#include "logger.h"
+#include "utilities.h"
 
 using std::cerr;
 using std::string;
 using std::set;
 using std::pair;
-
-ofstream messages;
-ofstream calls;
-ofstream routines;
-ofstream allocations;
-ofstream accesses;
-ofstream foreigns;
-
-PIN_LOCK logLock;
+using std::endl;
 
 UINT32 use_fff = 0;
 set<string> foreign_functions;
@@ -38,12 +34,13 @@ const char* StoreString(const string& str) {
     return ret.first->c_str();
 }
 
-AllocationTracker allocationTracker;
-LanguageTracker languageTracker(foreigns);
-ObjectTracker objectTracker;
+Logger logger;
+AllocationTracker allocationTracker(logger);
+LanguageTracker languageTracker(logger);
+ObjectTracker objectTracker(logger);
 
 INT32 Usage() {
-    cerr << "Baleen 🐋 (State-Based Model)" << endl;
+    cerr << "Baleen 🐋" << endl;
     cerr << KNOB_BASE::StringKnobSummary() << endl;
     return -1;
 }
@@ -59,34 +56,22 @@ VOID RecordMemWrite(THREADID tid, ADDRINT ip, ADDRINT addr) {
 }
 
 VOID BeforeRust(THREADID tid, char* name) {
-	PIN_GetLock(&logLock, tid + 1);
-    foreigns << "[ENTER RUST] " << name << endl;
-	PIN_ReleaseLock(&logLock);
-
+    logger.Stream(LogSubject::EXECUTION) << "[ENTER RUST] " << name << endl;
     languageTracker.Enter(tid, Language::RUST);
 }
 
 VOID AfterRust(THREADID tid, char* name) {
-	PIN_GetLock(&logLock, tid + 1);
-    foreigns << "[EXIT RUST] " << name << endl;
-	PIN_ReleaseLock(&logLock);
-
+    logger.Stream(LogSubject::EXECUTION) << "[EXIT RUST] " << name << endl;
     languageTracker.Exit(tid);
 }
 
 VOID BeforeC(THREADID tid, char* name) {
-	PIN_GetLock(&logLock, tid + 1);
-    foreigns << "[ENTER C] " << name << endl;
-	PIN_ReleaseLock(&logLock);
-
+    logger.Stream(LogSubject::EXECUTION) << "[ENTER C] " << name << endl;
     languageTracker.Enter(tid, Language::C);
 }
 
 VOID AfterC(THREADID tid, char* name) {
-	PIN_GetLock(&logLock, tid + 1);
-    foreigns << "[EXIT C] " << name << endl;
-	PIN_ReleaseLock(&logLock);
-
+    logger.Stream(LogSubject::EXECUTION) << "[EXIT C] " << name << endl;
     languageTracker.Exit(tid);
 }
 
@@ -116,7 +101,8 @@ VOID Instruction(INS ins, VOID *v) {
 }
 
 VOID BeforeBaleen(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT name) {
-    // objectTracker.RegisterObject(tid, addr, size, name);
+    Language lang = languageTracker.GetCurrent(tid);
+    objectTracker.RegisterObject(tid, addr, size, lang, name);
 }
 
 VOID BeforeMalloc(THREADID tid, USIZE size) {
@@ -126,7 +112,6 @@ VOID BeforeMalloc(THREADID tid, USIZE size) {
 
 VOID AfterMalloc(THREADID tid, ADDRINT returned) {
     Language lang = languageTracker.GetCurrent(tid);
-	foreigns << "malloc" << endl;
     allocationTracker.AfterMalloc(tid, returned, lang, objectTracker);
 }
 
@@ -137,7 +122,6 @@ VOID BeforePosixMemalign(THREADID tid, ADDRINT memptr, USIZE alignment, USIZE si
 
 VOID AfterPosixMemalign(THREADID tid, ADDRINT memptr, INT32 result) {
     Language lang = languageTracker.GetCurrent(tid);
-    foreigns << "posix_memalign" << endl;
     allocationTracker.AfterPosixMemalign(tid, memptr, result, lang, objectTracker);
 }
 
@@ -155,8 +139,7 @@ VOID BeforeFree(THREADID tid, ADDRINT addr) {
 }
 
 VOID InstrumentImage(IMG img, VOID *v) {
-    messages << "Instrumenting image: " << IMG_Name(img) << endl;
-    routines << "Instrumenting image: " << IMG_Name(img) << endl;
+    logger.Stream(LogSubject::INSTRUMENTATION) << "Instrumenting image: " << IMG_Name(img) << endl;
 
     for (SEC sec = IMG_SecHead(img); SEC_Valid(sec); sec = SEC_Next(sec)) {
         for (RTN rtn = SEC_RtnHead(sec); RTN_Valid(rtn); rtn = RTN_Next(rtn)) {
@@ -167,7 +150,7 @@ VOID InstrumentImage(IMG img, VOID *v) {
             PIN_GetSourceLocation(RTN_Address(rtn), NULL, &line, &file);
 
             if (EndsWith(file, ".rs") || RTN_IsRust(rtn)) {
-                routines << "(RUST) " << rtnName << endl;
+                logger.Stream(LogSubject::INSTRUMENTATION) << "(RUST) " << rtnName << endl;
 
                 // Store string for safe pointer usage
                 const char* safe_name = StoreString(rtnName);
@@ -175,16 +158,16 @@ VOID InstrumentImage(IMG img, VOID *v) {
                 RTN_Instrument(img, rtn, IPOINT_BEFORE,
                              (AFUNPTR) BeforeRust,
                              IARG_THREAD_ID,
-                             IARG_PTR, safe_name, // Pass name
+                             IARG_PTR, safe_name,
                              IARG_END);
                 
                 RTN_Instrument(img, rtn, IPOINT_AFTER,
                              (AFUNPTR) AfterRust,
                              IARG_THREAD_ID,
-                             IARG_PTR, safe_name, // Pass name
+                             IARG_PTR, safe_name,
                              IARG_END);
             } else {
-                routines << "(NOT RUST) " << rtnName << endl;
+                logger.Stream(LogSubject::INSTRUMENTATION) << "(NOT RUST) " << rtnName << endl;
             }
 
             if (foreign_functions.count(rtnName) > 0) {
@@ -194,19 +177,19 @@ VOID InstrumentImage(IMG img, VOID *v) {
                 RTN_Instrument(img, rtn, IPOINT_BEFORE,
                              (AFUNPTR) BeforeC,
                              IARG_THREAD_ID,
-                             IARG_PTR, safe_name, // Pass name
+                             IARG_PTR, safe_name,
                              IARG_END);
                 
                 RTN_Instrument(img, rtn, IPOINT_AFTER,
                              (AFUNPTR) AfterC,
                              IARG_THREAD_ID,
-                             IARG_PTR, safe_name, // Pass name
+                             IARG_PTR, safe_name,
                              IARG_END);
             }
         }
     }
 
-    routines << endl;
+    logger.Stream(LogSubject::INSTRUMENTATION) << endl;
 
     RTN_InstrumentByName(img, "baleen", IPOINT_BEFORE,
                          (AFUNPTR) BeforeBaleen,
@@ -258,11 +241,7 @@ VOID InstrumentImage(IMG img, VOID *v) {
 }
 
 VOID PrintReport(INT32 code, VOID *v) {
-    ofstream report("baleen-messages.log", std::ios::app);
-    if (!report) {
-        cerr << "Could not open report file." << endl;
-        return;
-    }
+    ofstream report("./.baleen/report.txt");
 
     allocationTracker.Report(report);
     objectTracker.Report(report);
@@ -271,70 +250,40 @@ VOID PrintReport(INT32 code, VOID *v) {
 }
 
 int main(int argc, char *argv[]) {
-    
+    // Create file to hold list of foreign functions
+    Run("touch .baleen/foreign-functions.txt");
 
-    foreigns.open(".baleen/foreigns.log");
-    allocations.open(".baleen/allocations.log");
-    routines.open(".baleen/routines.log");
-    messages.open("baleen-messages.log");
-    calls.open("baleen-calls.log");
-    accesses.open("baleen-accesses.log");
-
-    std::system("mkdir -p .baleen");
+    // Run the foreign function finder (FFF) to generate a list of foreign functions
+    const char* command = "bfff --output .baleen/foreign-functions.txt >/dev/null 2>&1";
     
-    const char* command = "/mnt/disk/.cargo/bin/bfff --output .baleen/foreign-functions.txt 2>&1";
-    
-    std::cout << "Executing: " << command << std::endl;
-    
-    FILE* pipe = popen(command, "r");
-    if (!pipe) {
-        std::cerr << "popen() failed: " << strerror(errno) << std::endl;
+    int status = Run(command);
+    if (status == -1) {
+        std::cerr << "Failed to complete foreign function analysis" << std::endl;
         exit(1);
+    } else if (WIFEXITED(status)) {
+        int exit_code = WEXITSTATUS(status);
+        if (exit_code != 0) {
+            std::cerr << "The Foreign Function Finder failed, please make sure it works manually" << std::endl;
+            exit(1);
+        }
     } else {
-        char buffer[256];
-        std::cout << "=== Command Output ===" << std::endl;
-        while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
-            std::cout << buffer;
-        }
-        std::cout << "=== End Output ===" << std::endl;
-        
-        int status = pclose(pipe);
-        std::cout << "Raw status: " << status << std::endl;
-        
-        if (status == -1) {
-            std::cerr << "pclose() failed: " << strerror(errno) << std::endl;
-            exit(1);
-        } else if (WIFEXITED(status)) {
-            int exit_code = WEXITSTATUS(status);
-            std::cout << "Exit code: " << exit_code << std::endl;
-            
-            if (exit_code == 0) {
-                std::cout << "Command executed successfully." << std::endl;
-                
-                // Open and read the file
-                std::ifstream input_file(".baleen/foreign-functions.txt");
-                if (!input_file.is_open()) {
-                    std::cerr << "Error: Could not open file .baleen/foreign-functions.txt" << std::endl;
-                    exit(1);
-                } else {
-                    std::string line;
-                    while (std::getline(input_file, line)) {
-                        if (!line.empty()) {
-                            foreign_functions.insert(line);
-                        }
-                    }
-                    input_file.close();
-                }
-            } else {
-                std::cerr << "Command failed with exit code: " << exit_code << std::endl;
-                exit(1);
-            }
-        } else {
-            std::cerr << "Command terminated abnormally" << std::endl;
-            exit(1);
-        }
+        std::cerr << "The Foreign Function Finder was interrupted unexpectedly" << std::endl;
+        exit(1);
     }
 
+    // Read the collected foreign functions
+    std::ifstream input_file(".baleen/foreign-functions.txt");
+    
+    std::string line;
+    while (std::getline(input_file, line)) {
+        if (!line.empty()) {
+            foreign_functions.insert(line);
+        }
+    }
+    
+    input_file.close();
+
+    // Initialize Pin
 	PIN_InitSymbols();
     
     if (PIN_Init(argc, argv)) {
@@ -346,13 +295,6 @@ int main(int argc, char *argv[]) {
     PIN_AddFiniFunction(PrintReport, 0);
  
     PIN_StartProgram();
-
-    allocations.close();
-    routines.close();
-    messages.close();
-    calls.close();
-    accesses.close();
-    foreigns.close();
 
     return 0;
 }

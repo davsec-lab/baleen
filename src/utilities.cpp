@@ -14,3 +14,14 @@ string ExtractFileName(const string& fullPath) {
         return fullPath.substr(lastSlashPos + 1);
     }
 }
+
+int Run(const char* command) {
+    FILE* pipe = popen(command, "r");
+
+    if (pipe) {
+        int status = pclose(pipe);
+        return status;
+    }
+
+    return -1;
+}

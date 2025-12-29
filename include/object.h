@@ -5,6 +5,7 @@
 
 #include "registry.h"
 #include "language.h"
+#include "logger.h"
 
 using std::hex;
 using std::dec;
@@ -15,7 +16,7 @@ using std::endl;
 class ObjectTracker {
 private:
 	PIN_LOCK lock;
-	ofstream log;
+	Logger& logger;
 
 	// Maps every starting address to its object (name and size).
 	Registry objects;
@@ -32,7 +33,7 @@ private:
 	USIZE objectNumber;
 
 public:
-	ObjectTracker();
+	ObjectTracker(Logger& l);
 
 	VOID RegisterObject(THREADID tid, ADDRINT addr, ADDRINT size, Language lang, ADDRINT name) {
 		PIN_GetLock(&lock, tid + 1);
@@ -62,7 +63,7 @@ public:
         writes[objectName][Language::C] = 0;
         writes[objectName][Language::RUST] = 0;
 
-		log << "[REGISTER OBJECT] Object '" << objectName
+		logger.Stream(LogSubject::OBJECTS) << "[REGISTER OBJECT] Object '" << objectName
 			<< "' occupies " << size
 			<< " bytes in range [0x" << hex << addr
 			<< ", 0x" << addr + size
@@ -77,16 +78,16 @@ public:
 		Node *node = objects.remove(oldAddr);
 
 		if (node) {
-			log << "[MOVE OBJECT] Object '" << node->name
+			logger.Stream(LogSubject::OBJECTS) << "[MOVE OBJECT] Object '" << node->name
 				<< "' was moved!" << endl;
 			
-			log << "[MOVE OBJECT] - [0x" << hex << node->start
+			logger.Stream(LogSubject::OBJECTS) << "[MOVE OBJECT] - [0x" << hex << node->start
 				<< ", 0x" << node->start + node->size
 				<< ") → [0x" << newAddr
 				<< ", 0x" << newAddr + size
 				<< ")" << dec << endl;
 			
-			log << "[MOVE OBJECT] - " << node->size
+			logger.Stream(LogSubject::OBJECTS) << "[MOVE OBJECT] - " << node->size
 				<< " → " << size
 				<< " bytes" << endl;
 			
@@ -99,7 +100,7 @@ public:
 		Node *object = objects.remove(addr);
 
 		if (object) {
-			log << "[REMOVE OBJECT] Object '" << object->name
+			logger.Stream(LogSubject::OBJECTS) << "[REMOVE OBJECT] Object '" << object->name
 				<< "' is no longer mapped to range [0x" << hex << object->start
 				<< ", 0x" << object->start + object->size
 				<< ")" << dec << endl;
@@ -115,7 +116,7 @@ public:
 		auto object = objects.find(addr);
 
 		if (object) {	
-			log << "[WRITE] Write to " << hex << addr
+			logger.Stream(LogSubject::ACCESS) << "[WRITE] Write to " << hex << addr
 			    << " ('" << object->name
 				<< "')" << dec
 				<< endl;
@@ -132,7 +133,7 @@ public:
 		auto object = objects.find(addr);
 
 		if (object) {	
-			log << "[READ] Read from " << hex << addr
+			logger.Stream(LogSubject::ACCESS) << "[READ] Read from " << hex << addr
 			    << " ('" << object->name
 				<< "')" << dec << endl;
 

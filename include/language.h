@@ -2,17 +2,15 @@
 #define LANGUAGE_H
 
 #include "pin.H"
+#include "logger.h"
 
 #include <stack>
-
 #include <string>
 #include <map>
 #include <iostream>
-#include <fstream>
 
 using std::string;
 using std::map;
-using std::ofstream;
 using std::endl;
 using std::stack;
 
@@ -28,10 +26,10 @@ private:
 	PIN_LOCK lock;
 	map<THREADID, Language> language;
 	map<THREADID, stack<Language>> remembered;
-	ofstream& log;
+	Logger& logger;
 
 public:
-	LanguageTracker(ofstream& l): log(l) {}
+	LanguageTracker(Logger& l): logger(l) {}
 
 	Language GetCurrent(THREADID tid);
 

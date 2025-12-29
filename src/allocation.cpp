@@ -1,7 +1,7 @@
 #include "allocation.h"
+#include "logger.h"
 
-AllocationTracker::AllocationTracker() {
-	log.open(".baleen/allocation.log");
+AllocationTracker::AllocationTracker(Logger& l) : logger(l) {
 }
 
 VOID AllocationTracker::Allocate(THREADID tid, UINT64 bytes, Language lang) {
@@ -29,7 +29,7 @@ VOID AllocationTracker::AfterMalloc(THREADID tid, ADDRINT returned, Language lan
 		// Register an object
 		objectTracker.RegisterObject(tid, returned, size, lang, 0);
 	} else {
-		log << "[AFTER MALLOC] [" << payload.first << "] 'malloc' failed" << endl;
+		logger.Stream(LogSubject::MEMORY) << "[AFTER MALLOC] [" << payload.first << "] 'malloc' failed" << endl;
 	}
 
 	PIN_ReleaseLock(&lock);
@@ -57,7 +57,7 @@ VOID AllocationTracker::AfterPosixMemalign(THREADID tid, ADDRINT memptr_addr, IN
 		Allocate(tid, size, lang);
 		objectTracker.RegisterObject(tid, returned, size, lang, 0);
 	} else {
-		log << "[AFTER POSIX_MEMALIGN] [" << get<0>(payload) << "] 'posix_memalign' failed with code " << result << endl;
+		logger.Stream(LogSubject::MEMORY) << "[AFTER POSIX_MEMALIGN] [" << get<0>(payload) << "] 'posix_memalign' failed with code " << result << endl;
 	}
 
 	PIN_ReleaseLock(&lock);
@@ -66,7 +66,7 @@ VOID AllocationTracker::AfterPosixMemalign(THREADID tid, ADDRINT memptr_addr, IN
 VOID AllocationTracker::BeforeRealloc(THREADID tid, ADDRINT addr, USIZE size, Language lang) {
 	PIN_GetLock(&lock, tid + 1);
 
-	log << "[BEFORE REALLOC]" << endl;
+	logger.Stream(LogSubject::MEMORY) << "[BEFORE REALLOC]" << endl;
 
 	auto id = counter[tid]["realloc"]++;
 	pendingRealloc[tid] = { id, addr, size };
@@ -77,7 +77,7 @@ VOID AllocationTracker::BeforeRealloc(THREADID tid, ADDRINT addr, USIZE size, La
 VOID AllocationTracker::AfterRealloc(THREADID tid, ADDRINT newAddr, ObjectTracker& objectTracker) {
 	PIN_GetLock(&lock, tid + 1);
 
-	log << "[AFTER REALLOC]" << endl;
+	logger.Stream(LogSubject::MEMORY) << "[AFTER REALLOC]" << endl;
 
 	auto payload = pendingRealloc[tid];
 
