@@ -29,14 +29,17 @@ private:
 	// Maps the name of every object to its write count.
 	map<string, map<Language, UINT64>> writes;
 
+	USIZE objectNumber;
+
 public:
 	ObjectTracker();
 
-	VOID RegisterObject(THREADID tid, ADDRINT addr, ADDRINT size, ADDRINT name) {
+	VOID RegisterObject(THREADID tid, ADDRINT addr, ADDRINT size, Language lang, ADDRINT name) {
 		PIN_GetLock(&lock, tid + 1);
 
 		// Read object name
-		string objectName = "UNKNOWN";
+		string objectName = std::to_string(objectNumber);
+		objectNumber += 1;
 
 		if (name != 0) {
 			char buffer[256];
@@ -46,7 +49,7 @@ public:
 		}
 
 		// Map the address range to the object name
-		objects.insert(addr, size, objectName);
+		objects.insert(addr, size, objectName, lang);
 		starts[objectName] = addr;
 
 		// Initialize counts
@@ -87,7 +90,7 @@ public:
 				<< " → " << size
 				<< " bytes" << endl;
 			
-			objects.insert(newAddr, size, node->name);
+			objects.insert(newAddr, size, node->name, node->lang);
 			starts[node->name] = newAddr;
 		}
 	}

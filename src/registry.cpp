@@ -4,7 +4,7 @@
 
 Registry::Registry() : root(nullptr) {}
 
-void Registry::insert(ADDRINT start, USIZE size, string object) {
+void Registry::insert(ADDRINT start, USIZE size, string object, Language lang) {
     // Create the new node
     Node *newNode = new Node;
     newNode->left = nullptr;
@@ -12,6 +12,7 @@ void Registry::insert(ADDRINT start, USIZE size, string object) {
     newNode->name = object;
     newNode->start = start;
     newNode->size = size;
+	newNode->lang = lang;
     
     // If tree is empty, set as root
     if (root == nullptr) {

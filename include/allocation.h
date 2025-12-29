@@ -20,6 +20,7 @@ private:
 	map<Language, UINT64> allocations;
 
 	map<THREADID, pair<UINT64, USIZE>> pendingMalloc;
+	map<THREADID, tuple<UINT64, ADDRINT, USIZE>> pendingPosixMemalign;
 	map<THREADID, tuple<UINT64, ADDRINT, USIZE>> pendingRealloc;
 
 	map<THREADID, map<string, UINT64>> counter;
@@ -30,7 +31,10 @@ public:
 	AllocationTracker();
 
 	VOID BeforeMalloc(THREADID tid, UINT64 bytes, Language lang);
-	VOID AfterMalloc(THREADID tid, ADDRINT returned, Language lang);
+	VOID AfterMalloc(THREADID tid, ADDRINT returned, Language lang, ObjectTracker& objectTracker);
+
+	VOID BeforePosixMemalign(THREADID tid, ADDRINT memptr_addr, USIZE alignment, USIZE size, Language lang);
+	VOID AfterPosixMemalign(THREADID tid, ADDRINT memptr_addr, INT32 result, Language lang, ObjectTracker& objectTracker);
 
 	VOID BeforeRealloc(THREADID tid, ADDRINT oldAddr, USIZE size, Language lang);
 	VOID AfterRealloc(THREADID tid, ADDRINT newAddr, ObjectTracker& objectTracker);

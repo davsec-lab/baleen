@@ -7,6 +7,8 @@
 #include <string>
 #include <types.h>
 
+#include "language.h"
+
 using std::string;
 
 typedef struct Node {
@@ -24,6 +26,9 @@ typedef struct Node {
 
     // The size of the allocated object.
     USIZE size;
+
+	// The language responsible for creating this object.
+	Language lang;
 } Node;
 
 class Registry {
@@ -35,7 +40,7 @@ public:
     Registry();
 
     // Map address to object.
-    void insert(ADDRINT start, USIZE size, string object);
+    void insert(ADDRINT start, USIZE size, string object, Language lang);
 
     // Find the object that contains `addr`.
     Node *find(ADDRINT addr);
