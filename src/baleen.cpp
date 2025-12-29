@@ -1,5 +1,7 @@
 #include <elf.h>
 #include <link.h>
+#include <cstdlib>
+#include <sys/wait.h>
 
 #include "pin.H"
 
@@ -23,6 +25,9 @@ ofstream accesses;
 ofstream foreigns;
 
 PIN_LOCK logLock;
+
+UINT32 use_fff = 0;
+set<string> foreign_functions;
 
 // Storage for strings to ensure pointers remain valid during execution
 static set<string> rtn_names; 
@@ -86,14 +91,24 @@ VOID AfterC(THREADID tid, char* name) {
 }
 
 bool IsIndirectCallToC(ADDRINT target, const string& caller_file) {
-    if (!EndsWith(caller_file, ".rs")) {
-        return false; 
-    }
-    
-    RTN target_rtn = RTN_FindByAddress(target);
-    
+	RTN target_rtn = RTN_FindByAddress(target);
+
     if (!RTN_Valid(target_rtn)) {
         return false;
+    }
+
+	string rtnName = RTN_Name(target_rtn);
+
+	if (use_fff) {
+		if (foreign_functions.count(rtnName) > 0) {
+			return true;
+		} else {
+			return false;
+		}
+	}
+
+	if (!EndsWith(caller_file, ".rs")) {
+        return false; 
     }
     
     ADDRINT rtnAddr = RTN_Address(target_rtn);
@@ -177,6 +192,33 @@ VOID Instruction(INS ins, VOID *v) {
             string cimg = ExtractFileName(IMG_Name(caller_img));
             string target_name = RTN_Name(target_rtn);
 
+			// Store string to ensure pointer validity
+			const char* safe_name = StoreString(target_name);
+
+			if (use_fff) {
+				// All we need to do is check whether 'target_name' is in our set of foreign functions
+				if (foreign_functions.count(target_name) > 0) {
+					INS_InsertCall(
+						ins, IPOINT_BEFORE,
+						(AFUNPTR) BeforeC,
+						IARG_THREAD_ID,
+						IARG_PTR, safe_name, // Pass name
+						IARG_END
+					);
+					
+					INS_InsertCall(
+						ins, IPOINT_TAKEN_BRANCH,
+						(AFUNPTR) AfterC,
+						IARG_THREAD_ID,
+						IARG_PTR, safe_name, // Pass name
+						IARG_END
+					);
+				}
+
+				return;
+			}
+
+			// We need to use some heuristics
             if (IMG_IsRuntime(timg) || RTN_IsRuntime(target_rtn) || RTN_IsPLTStub(target_rtn)) {
                 return;
             }
@@ -191,9 +233,6 @@ VOID Instruction(INS ins, VOID *v) {
                          << "' in image '" << cimg
                          << "'" << endl;
                 
-                // Store string to ensure pointer validity
-                const char* safe_name = StoreString(target_name);
-
                 INS_InsertCall(
                     ins, IPOINT_BEFORE,
                     (AFUNPTR) BeforeC,
@@ -371,11 +410,7 @@ VOID PrintReport(INT32 code, VOID *v) {
 }
 
 int main(int argc, char *argv[]) {
-    PIN_InitSymbols();
     
-    if (PIN_Init(argc, argv)) {
-        return Usage();
-    }
 
     foreigns.open(".baleen/foreigns.log");
     allocations.open(".baleen/allocations.log");
@@ -383,6 +418,76 @@ int main(int argc, char *argv[]) {
     messages.open("baleen-messages.log");
     calls.open("baleen-calls.log");
     accesses.open("baleen-accesses.log");
+
+	// Should we use the foreign function finder to collect all foreign functions?
+	const char* _use_fff = std::getenv("BALEEN_FFF");
+
+	if (_use_fff != nullptr) {
+		use_fff = std::atoi(_use_fff);
+	}
+
+	if (use_fff) {
+		std::system("mkdir -p .baleen");
+		
+		const char* command = "/mnt/disk/.cargo/bin/bfff --output .baleen/foreign-functions.txt 2>&1";
+		
+		std::cout << "Executing: " << command << std::endl;
+		
+		FILE* pipe = popen(command, "r");
+		if (!pipe) {
+			std::cerr << "popen() failed: " << strerror(errno) << std::endl;
+			use_fff = 0;
+		} else {
+			char buffer[256];
+			std::cout << "=== Command Output ===" << std::endl;
+			while (fgets(buffer, sizeof(buffer), pipe) != nullptr) {
+				std::cout << buffer;
+			}
+			std::cout << "=== End Output ===" << std::endl;
+			
+			int status = pclose(pipe);
+			std::cout << "Raw status: " << status << std::endl;
+			
+			if (status == -1) {
+				std::cerr << "pclose() failed: " << strerror(errno) << std::endl;
+				use_fff = 0;
+			} else if (WIFEXITED(status)) {
+				int exit_code = WEXITSTATUS(status);
+				std::cout << "Exit code: " << exit_code << std::endl;
+				
+				if (exit_code == 0) {
+					std::cout << "Command executed successfully." << std::endl;
+					
+					// Open and read the file
+					std::ifstream input_file(".baleen/foreign-functions.txt");
+					if (!input_file.is_open()) {
+						std::cerr << "Error: Could not open file .baleen/foreign-functions.txt" << std::endl;
+						use_fff = 0;
+					} else {
+						std::string line;
+						while (std::getline(input_file, line)) {
+							if (!line.empty()) {
+								foreign_functions.insert(line);
+							}
+						}
+						input_file.close();
+					}
+				} else {
+					std::cerr << "Command failed with exit code: " << exit_code << std::endl;
+					use_fff = 0;
+				}
+			} else {
+				std::cerr << "Command terminated abnormally" << std::endl;
+				use_fff = 0;
+			}
+		}
+	}
+
+	PIN_InitSymbols();
+    
+    if (PIN_Init(argc, argv)) {
+        return Usage();
+    }
 
     IMG_AddInstrumentFunction(InstrumentImage, 0);
     INS_AddInstrumentFunction(Instruction, 0);
