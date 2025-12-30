@@ -3,3 +3,6 @@ pin.log
 .clangd
 .cache
 output.txt
+.log
+target
+.baleen

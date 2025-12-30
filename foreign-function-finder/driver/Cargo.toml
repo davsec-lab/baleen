@@ -1,0 +1,16 @@
+[package]
+name = "driver"
+version = "0.1.0"
+edition.workspace = true
+
+[package.metadata.rust-analyzer]
+rustc_private = true
+
+[[bin]]
+name = "bfff-driver"
+path = "src/main.rs"
+
+[dependencies]
+simplelog.workspace = true
+log.workspace = true
+itertools.workspace = true
